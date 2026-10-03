@@ -67,6 +67,15 @@ experiment registry for the narrative of what was tried and why.
 | `go2_stabilize_reachavoidppo1p.yaml` | `on_policy` | `ReachAvoidPPO1P`, the safety-PPO recipe |
 | `car_goal.yaml` | `on_policy` | `ReachAvoidPPO1P` — the car-goal tutorial recipe |
 | `go2_walker_flat.yaml` | `on_policy` | `mode: cumulative` — the dense-reward Go2 walker (pi_task) on stock SB3 PPO |
+| `g1_stabilize_reachavoidppo1p.yaml` | `on_policy` | `ReachAvoidPPO1P` — the G1 humanoid standing twin (start here on the G1) |
+| `g1_locomote_reachavoidppo1p.yaml` | `on_policy` | `ReachAvoidPPO1P` — the G1 walking-at-a-command twin |
+| `g1_walker_flat.yaml` | `on_policy` | `mode: cumulative` — the dense-reward G1 walker (pi_task) on stock SB3 PPO |
+| `g1_walker_flat_fast.yaml` | `on_policy` | `mode: cumulative` — the same G1 walker, command fixed to vx ∈ (-0.5, 1.5), vy ∈ (-0.5, 0.5) m/s from step 0 |
+| `g1_stabilize_armrandom_reachavoidppo1p.yaml` | `on_policy` | `ReachAvoidPPO1P` — the G1 standing twin while the ARM joints swing smoothly at random, magnitude ramped 0 -> 2.0 |
+| `g1_stabilize_armadv_reachavoidppo2p.yaml` | `on_policy` | `ReachAvoidPPO2P` — the G1 standing twin vs an adversary that commands the ARM joints (warm-start from the wrench-adversary run) |
+| `g1_recover_armrandom_wrench_safetyppo2p.yaml` | `on_policy` | `SafetyPPO2P` — the G1 recovery fallback with random arms vs an adversarial torso wrench (force curriculum; warm-starts from the random-arm recover run) |
+| `g1_waist_stay_armrandom_safetyppo1p.yaml` | `on_policy` | `SafetyPPO1P` — G1 reach-avoid-stay, STAY half: upright and inside a waist roll/pitch + zero-velocity goal set, arms random (goal and arm magnitude curricula). Train first |
+| `g1_waist_reach_armrandom_reachavoidppo1p.yaml` | `on_policy` | `ReachAvoidPPO1P` — G1 reach-avoid-stay, REACH half: its target is the frozen stay twin's certified set (warm-starts from the stay run) |
 
 Add new recipes freely. Keep **canonical** recipes here (committed); keep ad-hoc
 sweeps / scratch experiments out of the repo (they belong with the private

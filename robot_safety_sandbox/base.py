@@ -46,6 +46,9 @@ except ImportError:  # cumulative-only install: tensor path disabled
   _HAS_SAFETY_SB3 = False
 
 TERMINAL_MARGIN = -0.1  # g anchor on failure terminations (pre-reset hook)
+# A margin_fn may carry its own anchor as a ``terminal_margin`` attribute (read
+# with getattr, like ``has_target``): g1_waist's stay margins anchor at -CLAMP so
+# that a fall is never cheaper than a goal-box violation.
 
 #: name of the uniform success DoneTerm added by end_criterion="reach-avoid"
 SUCCESS_TERM = "zoo_reach_success"
@@ -85,8 +88,10 @@ def zoo_reach_success(env, margin_fn=None) -> torch.Tensor:
 def safety_margin_hook(env, margin_fn=None) -> torch.Tensor:
   """Reward-term hook: computes (g, l) BEFORE mjlab's auto-reset (terminal-
   correct) and stashes them in ``env.extras``. g is anchored to the terminal
-  failure value on real terminations."""
+  failure value on real terminations: ``margin_fn.terminal_margin`` if it has
+  one, else TERMINAL_MARGIN."""
   g, l = _cached_margins(env, margin_fn)
+  anchor = float(getattr(margin_fn, "terminal_margin", TERMINAL_MARGIN))
   failed = env.termination_manager.terminated
   # A reach-avoid SUCCESS is a terminated step too (its DoneTerm sets terminated),
   # but it must NOT be anchored to the failure value: its terminal reach-avoid
@@ -95,13 +100,13 @@ def safety_margin_hook(env, margin_fn=None) -> torch.Tensor:
   # no-op and the anchor is bit-identical to before.
   if SUCCESS_TERM in env.termination_manager.active_terms:
     failed = failed & ~env.termination_manager.get_term(SUCCESS_TERM)
-  g = torch.where(failed, torch.minimum(g, torch.full_like(g, TERMINAL_MARGIN)), g)
+  g = torch.where(failed, torch.minimum(g, torch.full_like(g, anchor)), g)
   # NaN SANITATION: a physics NaN makes margins NaN in the SAME step the
   # nan_detection termination fires; the reset happens after the reward is
   # recorded, so one NaN margin can poison the rollout buffer and NaN the
   # policy weights (box stage-2 run 10d774v3 died this way at ~75M despite
   # nan_term). Grade corrupted states as failures, never as poison.
-  g = torch.nan_to_num(g, nan=TERMINAL_MARGIN, posinf=3.0, neginf=-3.0)
+  g = torch.nan_to_num(g, nan=anchor, posinf=3.0, neginf=-3.0)
   l = torch.nan_to_num(l, nan=-3.0, posinf=3.0, neginf=-3.0)
   env.extras["zoo_g"] = g
   env.extras["zoo_l"] = l
@@ -205,7 +210,8 @@ class _MjlabCore:
   def _init_core(self, num_envs, device, cfg_builder, margin_fn, *,
                  ctrl_dim, dstb_dim, ctrl_gain, force_max, adversary,
                  adversary_body, render_mode, obs_key=None, dense_reward=False,
-                 dstb_mode="wrench", dstb_gain=0.25, hybrid_skill=None,
+                 dstb_mode="wrench", dstb_gain=0.25, dstb_joint_slice=None,
+                 joint_noise=None, hybrid_skill=None,
                  latch_margin_fn=None, end_criterion="failure",
                  cfg_overrides=None, dense_margins=False, action_bound=1.0,
                  critic_obs_key=None):
@@ -236,9 +242,75 @@ class _MjlabCore:
     # "action" = ACTION-ADDITIVE disturbance, ctrl += dstb_gain * a_dstb — the
     # Robust-Gymnasium / classic-control two-player convention (e.g. hopper +-25%
     # of the ctrl bound). MuJoCo clamps ctrl to ctrlrange afterward.
+    # "joint" = JOINT-PARTITION disturbance: the adversary OWNS a slice of the
+    # robot's own actuators (envs/g1_arm_adversary — the adversary commands the
+    # arms, the actor the legs and waist). The ctrl vector stays the env's full
+    # action width and the bridge OVERWRITES the disturbance's slice in it, so
+    # the actor keeps its original action head (and a trained 1P checkpoint warm-
+    # starts whole) while its outputs on that slice are discarded. dstb_gain is
+    # the adversary's joint AUTHORITY, on top of whatever per-joint scale the
+    # mjlab action term already carries; ramp it with DstbGainRampCallback the
+    # way force_max is ramped for a wrench.
     self.dstb_mode = str(dstb_mode)
     self.dstb_gain = float(dstb_gain)
+    self._dstb_slice = None
+    # The joint slice has ONE owner: a joint-mode adversary, or the scripted
+    # joint_noise below. joint_noise may also run under a WRENCH adversary
+    # (g1_recover_arm_random_wrench: random arms + a learned torso push), since
+    # the two never share a channel; dstb_dim is then the wrench's width, 3.
+    if self.dstb_mode == "joint" and dstb_joint_slice is None:
+      raise ValueError(
+        "dstb_mode='joint' needs dstb_joint_slice=(start, stop): which action "
+        "dims the adversary owns (e.g. (15, 29) for the G1's 14 arm joints).")
+    if joint_noise is not None and dstb_joint_slice is None:
+      raise ValueError(
+        "joint_noise drives a joint slice, so it needs dstb_joint_slice="
+        "(start, stop): which action dims the random process owns.")
+    if dstb_joint_slice is not None:
+      if self.dstb_mode != "joint" and joint_noise is None:
+        raise ValueError(
+          f"dstb_joint_slice is only meaningful for dstb_mode='joint' or a "
+          f"joint_noise task, not dstb_mode={self.dstb_mode!r} alone.")
+      lo, hi = (int(x) for x in dstb_joint_slice)
+      if not 0 <= lo < hi <= self.ctrl_dim:
+        raise ValueError(
+          f"dstb_joint_slice=({lo}, {hi}) is not a sub-range of the env's "
+          f"{self.ctrl_dim} action dims.")
+      if self.dstb_mode == "joint" and hi - lo != self.dstb_dim:
+        raise ValueError(
+          f"dstb_joint_slice=({lo}, {hi}) spans {hi - lo} joints but dstb_dim="
+          f"{self.dstb_dim}; the adversary's action width must match the slice "
+          f"it drives.")
+      self._dstb_slice = (lo, hi)
+    # Per-env multiplier on the joint slice's command (a joint-mode adversary's
+    # or joint_noise's), (num_envs,) or None. Written by
+    # PerEnvForceScaleCallback(name="dstb_scale"); read only by
+    # _write_joint_slice (a wrench adversary's per-env knob is force_scale,
+    # read in _apply_dstb).
+    self.dstb_scale = None
     self.adversary = bool(adversary)
+    # SCRIPTED joint-partition disturbance (envs/g1_arm_random): the joint
+    # slice is driven by joint_noise.SmoothJointNoise instead of a learned
+    # adversary, in a SINGLE-player run. joint_noise is that generator's kwargs
+    # ({} = its defaults); None = off. Same slice, same dstb_gain x dstb_scale
+    # authority, same overwrite as the adversary, so the actor's head and obs
+    # are those of the joint-adversary task and checkpoints move between the two.
+    # With dstb_mode="wrench" a learned wrench adversary may play on top: it
+    # pushes adversary_body while the noise keeps the slice.
+    # Built after the mjlab env below (it needs the control dt).
+    self._joint_noise = None
+    if joint_noise is not None:
+      if self.dstb_mode not in ("joint", "wrench"):
+        raise ValueError(
+          f"joint_noise runs alone (dstb_mode='joint') or under a wrench "
+          f"adversary (dstb_mode='wrench'), not dstb_mode={self.dstb_mode!r}: "
+          f"an action-additive adversary would add onto the slice the noise "
+          f"overwrites.")
+      if self.adversary and self.dstb_mode == "joint":
+        raise ValueError(
+          "joint_noise and adversary=True would both drive the same joint "
+          "slice; with dstb_mode='joint' a scripted-disturbance task is "
+          "single-player.")
     self.dense_reward = bool(dense_reward)  # Stage-1: train on the env reward
     # dense reward AND margins: the reward stays the env's dense stack, while
     # (g, l) are computed alongside it for a train-time filter / failure
@@ -253,6 +325,13 @@ class _MjlabCore:
     # counters zeroed on each drain. See _count_step / _drain_counts / metrics.
     self._failures_total = 0
     self._zero_counts()
+    # Reach accounting (safety/reach_rate, safety/time_to_reach_s) only where l
+    # is a real target: an avoid task's l is a zero placeholder, on which every
+    # safe step would read as a reach. Same has_target reading as the registry.
+    self._track_reach = (margin_fn is not None
+                         and bool(getattr(margin_fn, "has_target", True))
+                         and (self.dense_margins or not self.dense_reward))
+    self._reach_ep = None     # per-env episode state, see _count_reach
     self.render_mode = render_mode
     self.mj = ManagerBasedRlEnv(
       cfg=build_task_cfg(cfg_builder, margin_fn, num_envs, dense=dense_reward,
@@ -261,6 +340,24 @@ class _MjlabCore:
                          dense_margins=self.dense_margins),
       device=device, render_mode="rgb_array" if render_mode else None)
     self._robot = self.mj.scene["robot"]
+    # Stamp the criterion onto the mjlab env so a margin_fn can see it. The
+    # arm-adversary task reads it: its disturbance-phase l shaping must not run
+    # under end_criterion="reach-avoid", where a shaped l would end the episode
+    # (see envs/g1_arm_adversary/env_cfg.py).
+    self.mj._zoo_end_criterion = self.end_criterion
+    if joint_noise is not None:
+      from .joint_noise import SmoothJointNoise
+      lo, hi = self._dstb_slice
+      self._joint_noise = SmoothJointNoise(
+        int(num_envs), hi - lo, float(self.mj.step_dt), device,
+        **joint_noise)
+      # The HOLD glide (see _reset_joint_noise); stays off unless the task's
+      # spawn publishes the action each env was restored with.
+      shape = (int(num_envs), hi - lo)
+      self._hold = torch.zeros(shape, device=device)
+      self._hold_t = torch.zeros(shape, device=device)
+      self._hold_T = torch.ones(shape, device=device)
+      self._hold_on = False
     if self.dstb_mode == "wrench":
       body_ids, _ = self._robot.find_bodies(adversary_body)
       self._adv_body_ids = list(body_ids)
@@ -360,13 +457,77 @@ class _MjlabCore:
       print(f"[hybrid] frozen skill loaded from {d}")
     return self._hyb
 
+  def _write_joint_slice(self, ctrl: torch.Tensor,
+                         a_dstb: torch.Tensor) -> torch.Tensor:
+    """Joint partition: the disturbance OWNS the dstb_joint_slice action dims.
+    Overwrite (not add) the actor's outputs there — the actor's values on the
+    slice are discarded, which is what lets it keep its full-width head. The
+    actor still SEES the result: mjlab's last_action observation reads the
+    vector submitted to mj.step, so next step's obs carries the disturbance's
+    joint command, not the actor's own discarded one. Shared by the learned
+    adversary and the scripted joint_noise, so both mean the same authority."""
+    lo, hi = self._dstb_slice
+    ctrl = ctrl.clone()
+    a_dstb = self.dstb_gain * a_dstb
+    # Per-env authority (survival curriculum, PerEnvForceScaleCallback with
+    # name="dstb_scale"): the joint-mode twin of force_scale. None -> every
+    # env at the global dstb_gain, which is the behavior before it existed.
+    if self.dstb_scale is not None:
+      a_dstb = a_dstb * self.dstb_scale.reshape(-1, 1)
+    ctrl[:, lo:hi] = a_dstb
+    return ctrl
+
+  def _reset_joint_noise(self, mask: Optional[torch.Tensor] = None) -> None:
+    """Restart the scripted joint slice for the envs in ``mask`` (None = all).
+
+    The generator restarts at 0, the default pose. A task whose spawn restores
+    a state mid-motion (g1_recover's harvested walker rows) publishes the
+    action each env was restored with as ``mj._zoo_reset_action``; the slice
+    then starts from THAT command instead: a hold term glides from it to zero
+    over the generator's first segment with the same minimum-jerk profile, so
+    the slice's command is one smooth glide, restored command -> first
+    waypoint, and the arms do not snap at the spawn. Tasks that publish
+    nothing keep the hold off, exactly as before.
+    """
+    self._joint_noise.reset(mask)
+    src = getattr(self.mj, "_zoo_reset_action", None)
+    if src is None:
+      return
+    lo, hi = self._dstb_slice
+    if mask is None:
+      mask = torch.ones(self._hold.shape[0], dtype=torch.bool,
+                        device=self._hold.device)
+    m = mask.reshape(-1, 1).bool()
+    self._hold.copy_(torch.where(m, src[:, lo:hi], self._hold))
+    self._hold_t.masked_fill_(m, 0.0)
+    self._hold_T.copy_(torch.where(m, self._joint_noise._T, self._hold_T))
+    self._hold_on = True
+
+  def _hold_glide(self) -> torch.Tensor:
+    """This step's hold term, then advance by one control step (the same
+    evaluate-then-advance order as ``SmoothJointNoise.step``)."""
+    from .joint_noise import _min_jerk
+    u = (self._hold_t / self._hold_T).clamp(0.0, 1.0)
+    out = self._hold * (1.0 - _min_jerk(u))
+    self._hold_t += float(self.mj.step_dt)
+    return out
+
   def _mj_step(self, actions: torch.Tensor):
     ctrl = actions[:, :self.ctrl_dim] * self.ctrl_gain
     if self.adversary:
       if self.dstb_mode == "action":
         ctrl = ctrl + self.dstb_gain * actions[:, self.ctrl_dim:]
+      elif self.dstb_mode == "joint":
+        ctrl = self._write_joint_slice(ctrl, actions[:, self.ctrl_dim:])
       else:
         self._apply_dstb(actions[:, self.ctrl_dim:])
+    # Not an elif: the noise may run under a WRENCH adversary (a joint-mode one
+    # is refused at init, so the two never write the slice in the same step).
+    if self._joint_noise is not None:
+      ctrl = self._write_joint_slice(ctrl, self._joint_noise.step())
+      if getattr(self, "_hold_on", False):
+        lo, hi = self._dstb_slice
+        ctrl[:, lo:hi] += self._hold_glide()
     if self.hybrid_skill is not None and self._last_l is not None:
       # latch on LAST step's l (computed inside the previous env.step); once
       # latched, the frozen skill controls the env until its episode ends.
@@ -412,13 +573,19 @@ class _MjlabCore:
     # is the step's own return, kept here for callers that do not consume it
     # (see MjlabTensorSafetyEnv.step_tensor's collapsed dones/timeouts).
     self._last_terminated, self._last_truncated = terminated, truncated
+    if self._joint_noise is not None:
+      # mjlab has already auto-reset these envs; their next command restarts
+      # from the pose the reset put the joints in (see _reset_joint_noise).
+      self._reset_joint_noise(terminated | truncated)
     # Always-on training-safety accounting. The margin is the task's g: the
     # returned reward-slot on a safety/reach-avoid env, the alongside-computed
     # _safety_g on a dense-reward+margins env, and absent on a plain cumulative
     # env (which has no margin to report).
     count_g = (self._safety_g if self.dense_margins
                else (None if self.dense_reward else g))
-    self._count_step(terminated, truncated, count_g)
+    count_l = (self._safety_l if self.dense_margins
+               else (None if self.dense_reward else l))
+    self._count_step(terminated, truncated, count_g, count_l)
     log = extras.get("log", {})
     for k, v in log.items():
       try:
@@ -475,11 +642,16 @@ class _MjlabCore:
     self._c_episodes = 0
     self._c_g_sum = 0.0
     self._c_g_min = float("inf")
+    # [episodes ended, of which safely reached, sum of steps to first reach],
+    # on the device (no per-step sync); None until a reach-tracking step.
+    self._c_reach = None
 
-  def _count_step(self, terminated, truncated, margin_g) -> None:
+  def _count_step(self, terminated, truncated, margin_g,
+                  margin_l=None) -> None:
     """Fold one step into the training-safety counters. A failure is a real
     termination (NOT a timeout); ``margin_g`` is None when the env computes no
-    task margin (a plain cumulative env)."""
+    task margin (a plain cumulative env). ``margin_l`` feeds the reach
+    counters on a task with a real target."""
     dones = terminated | truncated
     timeouts = truncated & ~terminated
     failed = dones & ~timeouts
@@ -491,6 +663,40 @@ class _MjlabCore:
     if margin_g is not None:
       self._c_g_sum += float(margin_g.sum())
       self._c_g_min = min(self._c_g_min, float(margin_g.min()))
+    if (getattr(self, "_track_reach", False) and margin_g is not None
+        and margin_l is not None):
+      self._count_reach(dones, margin_g, margin_l)
+
+  def _count_reach(self, dones, g, l) -> None:
+    """Per-episode SAFE reach, the reach-avoid outcome: the episode reached
+    ``l >= 0`` at a step where ``g >= 0``, with ``g >= 0`` at every earlier step
+    of the episode too. A later fall does not undo it (reach-avoid asks nothing
+    after the reach); a ``g < 0`` BEFORE it does, even one the env did not
+    terminate on (e.g. the G1's tilt between g's 50 deg and fell_over's 70 deg).
+    ``g`` arrives anchored on failure terminations, so a fall is never a reach.
+
+    Margins are those of the state each step produced, so the first reached
+    state of an episode is step k >= 1 and its time is k * step_dt.
+    """
+    ep = self._reach_ep
+    if ep is None:
+      zf, zb = torch.zeros_like(g), torch.zeros_like(g, dtype=torch.bool)
+      ep = self._reach_ep = {"t": zf, "t_hit": zf.clone(), "hit": zb,
+                             "bad": zb.clone()}
+    ep["t"] = ep["t"] + 1.0
+    new = (l >= 0.0) & (g >= 0.0) & ~ep["bad"] & ~ep["hit"]
+    ep["t_hit"] = torch.where(new, ep["t"], ep["t_hit"])
+    ep["hit"] = ep["hit"] | new
+    ep["bad"] = ep["bad"] | (g < 0.0)
+    ended = dones & ep["hit"]
+    add = torch.stack([dones.sum().float(), ended.sum().float(),
+                       (ep["t_hit"] * ended).sum()])
+    self._c_reach = add if self._c_reach is None else self._c_reach + add
+    keep = ~dones
+    ep["t"] = torch.where(keep, ep["t"], 0.0)
+    ep["t_hit"] = torch.where(keep, ep["t_hit"], 0.0)
+    ep["hit"] = ep["hit"] & keep
+    ep["bad"] = ep["bad"] & keep
 
   def _drain_counts(self) -> dict[str, float]:
     """The training-safety counters as safety/* metrics, then reset the window.
@@ -500,6 +706,15 @@ class _MjlabCore:
       safety/failure_rate     fraction of episodes this window ending in failure
       safety/episodes         episodes ended this window
       safety/margin_mean/_min the task margin g (only when the env computes one)
+      safety/reach_rate       fraction of episodes ended this window that
+                              SAFELY reached the target (see _count_reach);
+                              tasks with a real target only
+      safety/time_to_reach_s  mean time from episode start to that first safe
+                              reach, over those episodes
+
+    Like failure_rate, the reach counters see an episode only once it ENDS.
+    Early in a run, before the first timeouts, only falls have ended, so both
+    read pessimistic until then.
     """
     out = {"safety/failures_total": float(self._failures_total)}
     if self._c_steps:
@@ -510,6 +725,12 @@ class _MjlabCore:
       if self._c_g_min != float("inf"):
         out["safety/margin_mean"] = self._c_g_sum / self._c_steps
         out["safety/margin_min"] = self._c_g_min
+    if self._c_reach is not None:
+      n_ep, n_hit, t_sum = self._c_reach.tolist()
+      if n_ep > 0:
+        out["safety/reach_rate"] = n_hit / n_ep
+      if n_hit > 0:
+        out["safety/time_to_reach_s"] = t_sum / n_hit * float(self.mj.step_dt)
     self._zero_counts()
     return out
 
@@ -537,7 +758,8 @@ class MjlabTensorSafetyEnv(_MjlabCore, TensorVecEnv):
                margin_fn, ctrl_dim=12, dstb_dim=3, ctrl_gain=3.0,
                force_max=50.0, adversary=False, adversary_body="base_link",
                render_mode=None, obs_key=None, dense_reward=False,
-               dstb_mode="wrench", dstb_gain=0.25, hybrid_skill=None,
+               dstb_mode="wrench", dstb_gain=0.25, dstb_joint_slice=None,
+               joint_noise=None, hybrid_skill=None,
                  latch_margin_fn=None, end_criterion="failure",
                cfg_overrides=None, dense_margins=False, action_bound=1.0,
                critic_obs_key=None):
@@ -551,7 +773,9 @@ class MjlabTensorSafetyEnv(_MjlabCore, TensorVecEnv):
       dstb_dim=dstb_dim, ctrl_gain=ctrl_gain, force_max=force_max,
       adversary=adversary, adversary_body=adversary_body,
       render_mode=render_mode, obs_key=obs_key, dense_reward=dense_reward,
-      dstb_mode=dstb_mode, dstb_gain=dstb_gain, hybrid_skill=hybrid_skill,
+      dstb_mode=dstb_mode, dstb_gain=dstb_gain,
+      dstb_joint_slice=dstb_joint_slice, joint_noise=joint_noise,
+      hybrid_skill=hybrid_skill,
       latch_margin_fn=latch_margin_fn, end_criterion=end_criterion,
       cfg_overrides=cfg_overrides, dense_margins=dense_margins,
       action_bound=action_bound, critic_obs_key=critic_obs_key)
@@ -562,8 +786,11 @@ class MjlabTensorSafetyEnv(_MjlabCore, TensorVecEnv):
     self._obs_dict = obs_dict
     obs = obs_dict[self.obs_key].float()
     self.mj._zoo_last_obs = obs
+    if self._joint_noise is not None:
+      self._reset_joint_noise()
     self._hyb_latch.zero_()
     self._last_l = None
+    self._reach_ep = None      # every episode restarts: no reach carried over
     return obs
 
   def step_tensor(self, actions: torch.Tensor):
@@ -588,7 +815,8 @@ class MjlabNumpySafetyEnv(_MjlabCore, VecEnv):
                ctrl_dim=12, dstb_dim=3, ctrl_gain=3.0, force_max=50.0,
                adversary=False, adversary_body="base_link", render_mode=None,
                obs_key=None, dense_reward=False, dstb_mode="wrench",
-               dstb_gain=0.25, hybrid_skill=None, latch_margin_fn=None,
+               dstb_gain=0.25, dstb_joint_slice=None, joint_noise=None,
+               hybrid_skill=None, latch_margin_fn=None,
                end_criterion="failure", cfg_overrides=None,
                dense_margins=False, action_bound=1.0, critic_obs_key=None):
     obs_space, act_space = self._init_core(
@@ -596,7 +824,9 @@ class MjlabNumpySafetyEnv(_MjlabCore, VecEnv):
       dstb_dim=dstb_dim, ctrl_gain=ctrl_gain, force_max=force_max,
       adversary=adversary, adversary_body=adversary_body,
       render_mode=render_mode, obs_key=obs_key, dense_reward=dense_reward,
-      dstb_mode=dstb_mode, dstb_gain=dstb_gain, hybrid_skill=hybrid_skill,
+      dstb_mode=dstb_mode, dstb_gain=dstb_gain,
+      dstb_joint_slice=dstb_joint_slice, joint_noise=joint_noise,
+      hybrid_skill=hybrid_skill,
       latch_margin_fn=latch_margin_fn, end_criterion=end_criterion,
       cfg_overrides=cfg_overrides, dense_margins=dense_margins,
       action_bound=action_bound, critic_obs_key=critic_obs_key)
@@ -607,6 +837,9 @@ class MjlabNumpySafetyEnv(_MjlabCore, VecEnv):
   def reset(self):
     obs_dict, _ = self.mj.reset()
     self._obs_dict = obs_dict
+    if self._joint_noise is not None:
+      self._reset_joint_noise()
+    self._reach_ep = None      # every episode restarts: no reach carried over
     return obs_dict[self.obs_key].float().cpu().numpy()
 
   def step_async(self, actions):

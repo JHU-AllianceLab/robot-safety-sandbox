@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import os
+import tempfile
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
@@ -37,54 +38,163 @@ class StdFloorCallback(BaseCallback):
     return True
 
 
-class VideoWandbCallback(BaseCallback):
-  """Upload eval/video clips of the current deterministic policy.
+def _clip_path(outdir, step):
+  """``<run>/videos/step_<N>.mp4`` — created on demand."""
+  d = os.path.join(outdir, "videos")
+  os.makedirs(d, exist_ok=True)
+  return os.path.join(d, f"step_{int(step):012d}.mp4")
 
-  Uses a SEPARATE small render env (build with adversary off — show the
-  deployable ctrl policy). First clip fires immediately (warm-start
-  behavior), then every ``interval`` env-steps. Requires wandb.init'd."""
 
-  def __init__(self, eval_env_fn, interval=25_000_000, video_len=300):
-    super().__init__()
-    self.eval_env_fn, self.interval, self.video_len = eval_env_fn, interval, video_len
+def _record_clip(env, predict, n_frames, fps, path, bound):
+  """Roll ``predict`` on ``env`` for ``n_frames`` and STREAM them into an mp4.
+
+  Frames go straight to the encoder instead of being accumulated: a 20 s 720p
+  clip is ~2.8 GB of raw frames, and the array the old path built (list ->
+  np.stack -> transpose) held that twice before handing it to wandb, which then
+  re-encoded it. One frame is in flight here, and the finished FILE is what
+  wandb uploads.
+
+  ``bound`` is the action clamp, read from the render env's own action space —
+  NOT a hardcoded +-1. A task whose bridge action_bound is wider (the G1 tasks
+  use 3.0) would otherwise be rendered stride-capped, i.e. the clip would show a
+  policy that was never trained (the T006 failure mode, at video time).
+  """
+  import imageio
+  writer = imageio.get_writer(path, fps=fps, codec="libx264", quality=6,
+                              macro_block_size=1)
+  try:
+    obs = env.reset()
+    for _ in range(n_frames):
+      obs = predict(obs, bound)
+      writer.append_data(np.asarray(env.render()))
+  finally:
+    writer.close()
+  return path
+
+
+class _ClipRecorder:
+  """Shared plumbing for the two video callbacks: the render env, the clip
+  length (in seconds of robot motion or in frames), and the mp4 + optional
+  upload. Subclasses supply ``_predict_step``."""
+
+  def _init_clip(self, eval_env_fn, interval, video_len, video_seconds, fps,
+                 outdir, to_wandb, herd):
+    self.eval_env_fn, self.interval = eval_env_fn, interval
+    self.video_len, self.video_seconds, self.fps = video_len, video_seconds, fps
+    self.to_wandb = bool(to_wandb)
+    self.herd = herd
+    self._outdir = outdir or tempfile.mkdtemp(prefix="zoo_video_")
     self._env = None
     self._last = -10**15
+    self._bound = 1.0
 
-  def _on_training_start(self):
+  def _start_clip_env(self):
+    # interval <= 0 means "no clips": do not even BUILD the render env. It costs
+    # a second mjlab construction plus the GPU state for 8 extra envs, which a
+    # run that switched videos off is explicitly trying not to pay. (Before the
+    # recorder moved out of the wandb block, --no-wandb skipped this for free.)
+    if self.interval <= 0:
+      return
     self._env = self.eval_env_fn()
     # mjlab renders the tracked env + its nearest neighbors in ONE scene (a herd,
-    # like the unitree-rl-mjlab videos). Draw all the eval envs together.
+    # like the unitree-rl-mjlab videos). herd=None keeps that: draw every eval
+    # env. An explicit herd (0 = one robot, the car_goal showcase framing) is
+    # both cheaper -- the per-frame cost is dominated by the scene rebuild, not
+    # the pixels -- and easier to read for a single-robot gait.
+    n_extra = (max(1, int(self._env.num_envs) - 1) if self.herd is None
+               else int(self.herd))
     try:
-      self._env.mj.cfg.viewer.max_extra_envs = max(1, int(self._env.num_envs) - 1)
+      self._env.mj.cfg.viewer.max_extra_envs = n_extra
     except Exception:
       pass
+    # The clamp the clip must use; see _record_clip.
+    try:
+      self._bound = float(self._env.action_space.high[0])
+    except Exception:
+      self._bound = 1.0
+    # video_seconds is in seconds of ROBOT MOTION, resolved against this env's
+    # control dt so it means the same thing whatever the decimation is.
+    if self.video_seconds is not None:
+      try:
+        dt = float(self._env.mj.step_dt)
+        self.video_len = max(1, int(round(self.video_seconds / dt)))
+      except Exception:
+        pass
+
+  def _close_clip_env(self):
+    """Close the render env at the end of training. Without this, mujoco's
+    Renderer.__del__ runs during interpreter shutdown, where making the EGL
+    context current fails -- printing an 'Exception ignored in __del__'
+    EGLError traceback after the run has already succeeded."""
+    env, self._env = self._env, None
+    if env is not None:
+      try:
+        env.close()
+      except Exception:
+        pass
+
+  def _emit_clip(self):
+    path = _record_clip(self._env, self._predict_step, self.video_len,
+                        self.fps, _clip_path(self._outdir, self.num_timesteps),
+                        self._bound)
+    print(f"[video] {path} ({self.video_len} frames @ {self.fps} fps)",
+          flush=True)
+    if self.to_wandb:
+      import wandb
+      if wandb.run is not None:
+        # Hand wandb the FILE, not a frame array: no second copy, no re-encode.
+        wandb.log({"eval/video": wandb.Video(path, format="mp4")},
+                  step=self.num_timesteps)
+
+
+class VideoWandbCallback(_ClipRecorder, BaseCallback):
+  """Record eval clips of the current deterministic policy.
+
+  Uses a SEPARATE small render env (built with adversary off — show the
+  deployable ctrl policy). First clip fires immediately (warm-start
+  behavior), then every ``interval`` env-steps.
+
+  Every clip is written to ``<outdir>/videos/step_<N>.mp4``; ``to_wandb`` then
+  ALSO uploads that file. The local write is unconditional on purpose — a run
+  keeps its own footage whether or not wandb is in the picture, and a 720p clip
+  is the kind of thing you do not want to re-render to look at twice.
+  """
+
+  def __init__(self, eval_env_fn, interval=25_000_000, video_len=300,
+               video_seconds=None, fps=30, outdir=None, to_wandb=True,
+               herd=None):
+    super().__init__()
+    self._init_clip(eval_env_fn, interval, video_len, video_seconds, fps,
+                    outdir, to_wandb, herd)
+
+  def _on_training_start(self):
+    self._start_clip_env()
+
+  def _on_training_end(self):
+    self._close_clip_env()
 
   def _on_step(self):
     # interval <= 0 DISABLES the clips. Without this the comparison reads
     # "0 >= 0" every step and the callback renders a video PER STEP -- the
     # natural way to spell "no videos" silently became the most expensive
     # possible setting, on the runs (long, shared GPU) that most need it off.
-    if self.interval > 0 and self.num_timesteps - self._last >= self.interval:
+    if (self.interval > 0 and self._env is not None
+        and self.num_timesteps - self._last >= self.interval):
       self._last = self.num_timesteps
-      self._log_video()
+      try:
+        self._emit_clip()
+      except Exception as e:  # a bad clip must never kill a long train
+        print(f"[video] skipped: {e}", flush=True)
     return True
 
-  def _log_video(self):
+  def _predict_step(self, obs, bound):
     import torch as th
-    import wandb
     tvn = self.model.env if hasattr(self.model.env, "normalize_obs") else None
-    obs = self._env.reset()
-    frames = []
-    for _ in range(self.video_len):
-      o = obs if tvn is None else tvn.normalize_obs(obs)
-      with th.no_grad():
-        act = self.model.policy._predict(o, deterministic=True)
-      obs, _g, _d, _t, _l = self._env.step_tensor(
-        th.clamp(act, -1.0, 1.0))
-      frames.append(np.asarray(self._env.render()))  # native herd render
-    vid = np.stack(frames).transpose(0, 3, 1, 2)
-    wandb.log({"eval/video": wandb.Video(vid, fps=30, format="mp4")},
-              step=self.num_timesteps)
+    o = obs if tvn is None else tvn.normalize_obs(obs)
+    with th.no_grad():
+      act = self.model.policy._predict(o, deterministic=True)
+    obs, _g, _d, _t, _l = self._env.step_tensor(th.clamp(act, -bound, bound))
+    return obs
 
 
 class DenseMetricsCallback(BaseCallback):
@@ -108,7 +218,7 @@ class DenseMetricsCallback(BaseCallback):
     return True
 
 
-class DenseVideoWandbCallback(BaseCallback):
+class DenseVideoWandbCallback(_ClipRecorder, BaseCallback):
   """eval/video for the STAGE-1 dense walker (stock SB3 PPO on the NUMPY bridge).
 
   Renders on a SEPARATE tensor env built in DENSE mode (no force / no safety
@@ -122,49 +232,43 @@ class DenseVideoWandbCallback(BaseCallback):
   advances num_timesteps by N*n_steps, so any ``interval`` below that resolves to
   "every rollout"."""
 
-  def __init__(self, eval_env_fn, interval=10_000_000, video_len=300):
+  def __init__(self, eval_env_fn, interval=10_000_000, video_len=300,
+               video_seconds=None, fps=30, outdir=None, to_wandb=True,
+               herd=None):
     super().__init__()
-    self.eval_env_fn, self.interval, self.video_len = eval_env_fn, interval, video_len
-    self._env = None
-    self._last = -10**15
+    self._init_clip(eval_env_fn, interval, video_len, video_seconds, fps,
+                    outdir, to_wandb, herd)
 
   def _on_training_start(self):
-    self._env = self.eval_env_fn()
-    try:
-      self._env.mj.cfg.viewer.max_extra_envs = max(1, int(self._env.num_envs) - 1)
-    except Exception:
-      pass
+    self._start_clip_env()
+
+  def _on_training_end(self):
+    self._close_clip_env()
 
   def _on_step(self):
     return True
 
   def _on_rollout_end(self):
     # interval <= 0 disables the clips; see VideoWandbCallback._on_step.
-    if self.interval > 0 and self.num_timesteps - self._last >= self.interval:
+    if (self.interval > 0 and self._env is not None
+        and self.num_timesteps - self._last >= self.interval):
       self._last = self.num_timesteps
       try:
-        self._log_video()
+        self._emit_clip()
       except Exception as e:  # a bad clip must never kill a long train
-        print(f"[dense-video] skipped: {e}")
+        print(f"[dense-video] skipped: {e}", flush=True)
 
-  def _log_video(self):
+  def _predict_step(self, obs, bound):
     import torch as th
-    import wandb
     vn = self.model.env if hasattr(self.model.env, "normalize_obs") else None
-    obs = self._env.reset()
-    dev = obs.device
-    frames = []
-    for _ in range(self.video_len):
-      o = obs.detach().cpu().numpy()
-      if vn is not None:
-        o = vn.normalize_obs(o)
-      act, _ = self.model.predict(o, deterministic=True)  # stock PPO, numpy
-      obs, _g, _d, _t, _l = self._env.step_tensor(
-        th.as_tensor(np.clip(act, -1.0, 1.0), dtype=th.float32, device=dev))
-      frames.append(np.asarray(self._env.render()))  # native herd render
-    vid = np.stack(frames).transpose(0, 3, 1, 2)
-    wandb.log({"eval/video": wandb.Video(vid, fps=30, format="mp4")},
-              step=self.num_timesteps)
+    o = obs.detach().cpu().numpy()
+    if vn is not None:
+      o = vn.normalize_obs(o)
+    act, _ = self.model.predict(o, deterministic=True)  # stock PPO, numpy
+    obs, _g, _d, _t, _l = self._env.step_tensor(
+      th.as_tensor(np.clip(act, -bound, bound), dtype=th.float32,
+                   device=obs.device))
+    return obs
 
 
 class VecNormSaveCallback(BaseCallback):
@@ -208,6 +312,99 @@ class TensorNormSaveCallback(BaseCallback):
     return True
 
 
+class CriticWarmupCallback(BaseCallback):
+  """Freeze the ACTOR for the first ``warmup_steps`` so the critic can fit the
+  inherited policy before any policy gradient is taken.
+
+  For a WARM-STARTED run whose value net was reset (``--reset-value``), the first
+  updates compute advantages from a randomly-initialized critic: the policy is
+  pushed in a direction that carries no information, which is exactly the gait
+  the warm-start was meant to preserve. This blocks gradients into every actor
+  parameter (the policy MLP, the action head and ``log_std``) while the value
+  loss trains normally, so the critic converges
+  toward V^pi for the policy that is actually collecting the data -- on-policy
+  and correct -- and the first real policy gradient points somewhere meaningful.
+
+  The actor keeps ACTING throughout; only its parameters are frozen. Freezing it
+  and stopping it from acting would leave nothing to learn a value for.
+
+  Two interactions worth knowing. ``approx_kl`` reads ~0 while frozen (the PPO
+  ratio is exactly 1), so a ``target_kl`` early-stop never fires and every epoch
+  runs -- maximum critic data per rollout.
+
+  And ``--max-std`` is NOT blocked by the freeze: that callback clamps
+  ``log_std`` under ``no_grad``, writing the tensor directly, so a warm-started
+  policy whose std exceeds the cap is pulled down to it on the first rollout and
+  held there (measured: a walker at std 0.507 lands exactly on log(0.4) under the
+  reach-avoid recipe). This is the behavior to want -- the critic then fits the
+  policy that will actually keep training -- but it does mean "frozen actor" is
+  about GRADIENTS, not about every byte of the actor staying put.
+
+  Watch ``train/explained_variance``: once it climbs past ~0.7 the critic is
+  tracking returns and the warmup has done its job.
+
+  Sibling of :class:`NormFreezeCallback` (which freezes the OBS NORMALIZER for
+  the same reason, on the same kind of run) -- the two are complementary and
+  usually both want to be on for a warm-start.
+  """
+
+  #: Parameter-name fragments that belong to the VALUE pathway of an SB3
+  #: ActorCriticPolicy; everything else in the policy is the actor.
+  _VALUE_KEYS = ("value_net",)
+
+  def __init__(self, warmup_steps: int = 0):
+    super().__init__()
+    self.warmup_steps = int(warmup_steps)
+    self._frozen: list = []
+    self._released = False
+
+  def _actor_params(self):
+    return [(n, p) for n, p in self.model.policy.named_parameters()
+            if not any(k in n for k in self._VALUE_KEYS)]
+
+  def _on_training_start(self):
+    if self.warmup_steps <= 0:
+      self._released = True
+      return
+    pol = self.model.policy
+    if not hasattr(pol, "value_net"):
+      # Not an ActorCriticPolicy (the SAC family keeps .actor / .critic instead).
+      # Fail loud rather than "freeze" nothing and report a warmup that never ran.
+      raise SystemExit(
+        "[critic-warmup] this policy has no .value_net, so the actor/critic split "
+        f"this callback assumes does not apply ({type(pol).__name__}). It targets "
+        "the PPO family (SB3 ActorCriticPolicy and the safety_sb3 subclasses).")
+    self._frozen = [p for _n, p in self._actor_params() if p.requires_grad]
+    for p in self._frozen:
+      p.requires_grad_(False)
+    n_val = sum(1 for n, _ in pol.named_parameters()
+                if any(k in n for k in self._VALUE_KEYS))
+    print(f"[critic-warmup] actor FROZEN for the first {self.warmup_steps:,} env-steps "
+          f"({len(self._frozen)} actor tensors held, {n_val} value tensors training)",
+          flush=True)
+
+  def _release(self):
+    for p in self._frozen:
+      p.requires_grad_(True)
+    self._frozen = []
+    self._released = True
+    print(f"[critic-warmup] actor RELEASED at {self.num_timesteps:,} env-steps "
+          f"-- normal PPO resumes", flush=True)
+
+  def _on_step(self):
+    if not self._released and self.num_timesteps >= self.warmup_steps:
+      self._release()
+    self.logger.record("warmup/actor_frozen", float(not self._released))
+    return True
+
+  def _on_training_end(self):
+    # A run that ends INSIDE the warmup window must not leave the actor frozen in
+    # the saved model -- a later warm-start from it would load parameters whose
+    # requires_grad is False and silently train nothing.
+    if not self._released:
+      self._release()
+
+
 class NormFreezeCallback(BaseCallback):
   """Freeze obs-normalizer updates for the first ``freeze_steps`` of a
   WARM-STARTED run: the inherited policy expects the loaded stats; letting
@@ -236,11 +433,27 @@ class PerEnvForceScaleCallback(BaseCallback):
   the adversary's force PER ENV by a survival curriculum — envs that fail get
   a weaker adversary (+recover), envs that survive get a stronger one. This is
   what stabilized the reference two-player game after pinned curricula and the
-  global force ramp were not enough."""
+  global force ramp were not enough.
 
-  def __init__(self, step=0.05, lo=0.3, hi=1.0, init=0.5):
+  ``name`` is the bridge attribute the per-env scale is written to, and the
+  stem of its log keys. ``"force_scale"`` (default) multiplies a WRENCH
+  adversary's force magnitude (``base._MjlabCore._apply_dstb``);
+  ``"dstb_scale"`` multiplies a JOINT-partition adversary's joint command
+  (``dstb_mode="joint"``, e.g. the G1 arm adversary) on top of the global
+  ``dstb_gain`` ramp. Same survival rule either way: each env settles near the
+  adversary strength at which it survives about half its episodes, clamped to
+  ``[lo, hi]``.
+
+  Logs ``game/<name>_mean`` and ``game/<name>_at_floor`` (the fraction of envs
+  pinned at ``lo``). A mean that climbs to ``hi`` says the controller has caught
+  up with the full-strength adversary; an at_floor fraction near 1 says it is
+  losing even at the weakest allowed adversary — lower ``lo``.
+  """
+
+  def __init__(self, step=0.05, lo=0.3, hi=1.0, init=0.5, name="force_scale"):
     super().__init__()
     self.step, self.lo, self.hi, self.init = step, lo, hi, init
+    self.name = str(name)
     self._bridge = None
     self._scale = None
 
@@ -251,7 +464,7 @@ class PerEnvForceScaleCallback(BaseCallback):
       e = e.venv
     self._bridge = e
     self._scale = th.full((e.num_envs,), self.init, device=e.device)
-    e.force_scale = self._scale
+    setattr(e, self.name, self._scale)
 
   def _on_step(self):
     import torch as th
@@ -264,7 +477,9 @@ class PerEnvForceScaleCallback(BaseCallback):
     failed = d & ~timeouts.bool()
     self._scale += self.step * survived.float() - self.step * failed.float()
     self._scale.clamp_(self.lo, self.hi)
-    self.logger.record("game/force_scale_mean", float(self._scale.mean()))
+    self.logger.record(f"game/{self.name}_mean", float(self._scale.mean()))
+    self.logger.record(f"game/{self.name}_at_floor",
+                       float((self._scale <= self.lo + 1e-6).float().mean()))
     return True
 
 
@@ -391,4 +606,119 @@ class LAnnealCallback(BaseCallback):
     if self._mj is not None:
       self._mj._l_alpha = a
     self.logger.record("curriculum/l_alpha", float(a))
+    return True
+
+
+class DstbPhaseCallback(BaseCallback):
+  """Tell the env which PLAYER is currently collecting a rollout, so a task's
+  margin function can hand the two players different targets.
+
+  The two-player PPO learner is zero-sum by construction: ``ppo_2p`` negates the
+  disturbance advantage on the SAME reach-avoid targets the control player was
+  scored on, so the env's single (g, l) channel is all either player ever sees.
+  A task that needs the disturbance to be penalized for something of its OWN —
+  ``g1_arm_adversary``, where the adversary drives the robot's arms and must not
+  win by driving them through the torso — has nowhere to put that penalty
+  without also paying the control player for it, which is the wrong sign.
+
+  This callback opens the one channel that is missing: it reads the learner's
+  own ``_phase()`` at each rollout start (it is constant for the whole rollout,
+  which is why this hook and not ``_on_step`` — the latter would mislabel the
+  first step after every phase switch) and stamps it on the mjlab env as
+  ``_zoo_dstb_phase``. A margin_fn reads it with
+  ``getattr(env, "_zoo_dstb_phase", False)`` and shapes accordingly; every task
+  that does not read it is completely unaffected.
+
+  Same env-reach pattern as :class:`LAnnealCallback` (through the bridge's
+  ``.mj``). On a 1P learner there is no ``_phase`` and the flag stays False, so
+  attaching this to a single-player run is a no-op rather than an error.
+  """
+
+  def __init__(self):
+    super().__init__()
+    self._mj = None
+
+  def _on_training_start(self):
+    e = self.model.env
+    while hasattr(e, "venv"):
+      e = e.venv
+    self._mj = getattr(e, "mj", None)
+    if self._mj is not None:
+      self._mj._zoo_dstb_phase = False
+
+  def _on_rollout_start(self):
+    if self._mj is None:
+      return
+    phase = getattr(self.model, "_phase", None)
+    is_dstb = bool(phase() == "dstb") if callable(phase) else False
+    self._mj._zoo_dstb_phase = is_dstb
+    self.logger.record("game/dstb_phase", float(is_dstb))
+
+  def _on_step(self):
+    return True
+
+
+class DstbGainRampCallback(BaseCallback):
+  """Ramp a JOINT-partition adversary's authority from ``gain_start`` to
+  ``gain_max`` over ``ramp_steps`` — the ``dstb_mode="joint"`` twin of
+  :class:`ForceRampCallback`.
+
+  Same reason as the force ramp: an adversary handed its full authority at step
+  zero simply throws the robot down every episode, the control player never sees
+  a survivable state, and the game freezes with no gradient. Here the authority
+  is ``bridge.dstb_gain``, the multiplier on the adversary's joint command
+  (which mjlab's action term then scales per joint), so 1.0 means "the adversary
+  drives its joints with exactly the authority the actor has over its own".
+  """
+
+  def __init__(self, gain_max=1.0, ramp_steps=1_000_000_000, gain_start=0.1):
+    super().__init__()
+    self.gmax, self.ramp, self.gstart = gain_max, ramp_steps, gain_start
+    self._bridge = None
+
+  def _on_training_start(self):
+    e = self.model.env
+    while hasattr(e, "venv"):
+      e = e.venv
+    self._bridge = e
+
+  def _on_step(self):
+    frac = min(1.0, self.num_timesteps / max(1, self.ramp))
+    self._bridge.dstb_gain = self.gstart + (self.gmax - self.gstart) * frac
+    self.logger.record("game/dstb_gain", float(self._bridge.dstb_gain))
+    return True
+
+
+class TargetScaleRampCallback(BaseCallback):
+  """Ramp a goal command's sampling MAGNITUDE from ``scale_start`` to 1.0 over
+  ``ramp_steps`` -- the goal-side twin of :class:`DstbGainRampCallback`.
+
+  The command term exposes ``scale`` as a fraction of its full goal range (e.g.
+  ``envs/g1_waist/command.py``: goals drawn from ``+-scale * max_angle``), and
+  sets ``ramped = True`` so the trainer knows to attach this. Only the TRAINING
+  env is ramped; an env built elsewhere (eval, play, the training video) keeps
+  the term's default scale of 1.0, the full goal range.
+
+  Logs ``curriculum/<term>_scale``.
+  """
+
+  def __init__(self, term_name: str, ramp_steps: int = 1_000_000_000,
+               scale_start: float = 0.0):
+    super().__init__()
+    self.term_name = str(term_name)
+    self.ramp, self.start = int(ramp_steps), float(scale_start)
+    self._term = None
+
+  def _on_training_start(self):
+    e = self.model.env
+    while hasattr(e, "venv"):
+      e = e.venv
+    self._term = e.mj.command_manager.get_term(self.term_name)
+    self._term.scale = self.start
+
+  def _on_step(self):
+    frac = min(1.0, self.num_timesteps / max(1, self.ramp))
+    self._term.scale = self.start + (1.0 - self.start) * frac
+    self.logger.record(f"curriculum/{self.term_name}_scale",
+                       float(self._term.scale))
     return True

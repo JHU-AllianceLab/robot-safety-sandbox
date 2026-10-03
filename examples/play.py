@@ -58,6 +58,9 @@ class _PlayEnv:
   def __init__(self, safety_env):
     self._e = safety_env
     self._obs = None
+    # The bridge's own action box (+-action_bound; 3.0 on the G1 tasks), the
+    # clamp training used -- not a hardcoded +-1.
+    self._bound = float(safety_env.action_space.high[0])
 
   @property
   def num_envs(self):
@@ -81,7 +84,8 @@ class _PlayEnv:
     return self._obs
 
   def step(self, actions):
-    self._obs, *_ = self._e.step_tensor(th.clamp(actions, -1.0, 1.0))
+    self._obs, *_ = self._e.step_tensor(
+      th.clamp(actions, -self._bound, self._bound))
     return self._obs
 
   def reset(self):
@@ -112,10 +116,26 @@ class _Policy:
     self._m = model
     self._adv = adversary
     self._stock = stock
-    self._dstb = None if stock else getattr(model.policy, "dstb_actor", None)
+    # Two DIFFERENT 2P architectures store the disturbance player differently
+    # (safety_sb3's ppo_2p.py docstring is explicit about this): PPO2P keeps two
+    # independent policies -- ``model.policy`` is ALWAYS ctrl-only, and the
+    # disturbance player is the sibling ``model.dstb_policy`` (a full
+    # ActorCriticPolicy, called like the ctrl one via ``._predict``). SAC2P's two
+    # players share one joint-action critic, so its disturbance actor is nested
+    # at ``model.policy.dstb_actor`` (a bare Actor module, called directly).
+    self._dstb = None
+    self._dstb_is_policy = False
+    if not stock:
+      ppo2p_dstb = getattr(model, "dstb_policy", None)
+      sac2p_dstb = getattr(model.policy, "dstb_actor", None)
+      if ppo2p_dstb is not None:
+        self._dstb, self._dstb_is_policy = ppo2p_dstb, True
+      elif sac2p_dstb is not None:
+        self._dstb, self._dstb_is_policy = sac2p_dstb, False
     if adversary and self._dstb is None:
       raise RuntimeError(
-        "--adversary needs a two-player checkpoint exposing policy.dstb_actor")
+        "--adversary needs a two-player checkpoint exposing model.dstb_policy "
+        "(PPO2P) or policy.dstb_actor (SAC2P)")
     self._mean = self._var = None
     tp = os.path.join(run_dir, "tensornormalize.pt")
     vp = os.path.join(run_dir, "vecnormalize.pkl")
@@ -146,7 +166,8 @@ class _Policy:
       ctrl = self._m.policy._predict(o, deterministic=True)
       if not self._adv:
         return ctrl
-      dstb = self._dstb(o, deterministic=True)
+      dstb = (self._dstb._predict(o, deterministic=True) if self._dstb_is_policy
+              else self._dstb(o, deterministic=True))
       return th.cat([ctrl, dstb], dim=1)
 
 

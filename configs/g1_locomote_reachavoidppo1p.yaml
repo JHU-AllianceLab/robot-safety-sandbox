@@ -1,0 +1,47 @@
+# ReachAvoidPPO1P on g1_locomote: M=ReachAvoid (the task's mode), A=PPO
+# (family: on_policy), P=1P (no adversary). The humanoid twin of
+# configs/go2_stabilize_reachavoidppo1p.yaml — same safety-PPO recipe
+# (obs-normalized, fixed LR, KL early-stop, capped action std), widened for a
+# 29-dof robot.
+#   python examples/train.py --config configs/g1_locomote_reachavoidppo1p.yaml
+# Add `adversary: true` for ReachAvoidPPO2P (the alternating best-response game);
+# a G1 is 33 kg against the Go2's 15, so pair it with `force_max: 100.0`.
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_locomote
+num_envs: 4096           # ~0.7 GiB of sim state; ~75k env-steps/s on an RTX 5080
+steps: 200000000
+seed: 0
+
+# --- safety-PPO recipe ---
+lr: 1.0e-4
+adaptive_lr: false           # fixed LR (--no-adaptive-lr) for the sparse safety signal
+target_kl: 0.01              # early-stop actor epochs at this KL
+ent_coef: 1.0e-3
+max_std: 0.4                 # cap the action std (prevents entropy runaway)
+net: "512,256,128"           # wider than the Go2's safety net: 98-dim obs, 29-dim action.
+                             # Keep it EQUAL to configs/g1_walker_flat.yaml's `net` if you
+                             # intend to warm-start from that walker (--load); the trainer
+                             # transfers shape-matching tensors only and reports the count.
+terminal_type: all           # value a terminal step as min(l,g)
+
+# GAMMA: fixed at 0.99 unless you say otherwise. safety_sb3's own default is to
+# ANNEAL 0.99->0.9999, but the on-policy trainer overrides that to OFF
+# (`--gamma-anneal` defaults False: on PPO's GAE the near-undiscounted target can
+# diverge -- car_goal E064 saw value_loss 1e5). Note 1/(1-0.99) = a 100-step
+# horizon, which is SHORTER than an episode here (1000 steps at 50 Hz); a failure
+# 400 steps out is discounted by 0.99^400 = 0.018, i.e. invisible. For a safety
+# value, prefer a higher FIXED gamma (`gamma: 0.999` -> a 1000-step horizon)
+# rather than enabling the anneal.
+
+# The forward command the reach target tracks (m/s). It is pinned for the whole
+# run — `l >= 0` means "walking at THIS speed", so changing it changes the task.
+env_overrides:
+  cmd_vx: 1.0
+
+# --- video: 720p, 20 s of real-time motion, written to <run>/videos/ only ---
+# The mp4 is always saved in the run folder; video_wandb: false keeps it OFF
+# wandb (a 720p/20 s clip is ~5-8 MB vs ~0.3 MB for the old 320x240/10 s one,
+# which would take a long run's media from ~7 MB to ~300 MB).
+video_seconds: 20        # seconds of ROBOT MOTION (resolved via the 50 Hz control dt)
+video_fps: 50            # = 1/control-dt -> real-time playback, not 0.6x slow motion
+video_wandb: false       # scalars still go to wandb; only the clip stays local

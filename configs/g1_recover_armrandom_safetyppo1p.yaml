@@ -1,0 +1,62 @@
+# SafetyPPO1P on g1_recover_arm_random: the g1_recover fallback with the arm
+# split of g1_stabilize_arm_random. The actor owns legs + waist (action dims
+# 0..14); the arms (15..28) swing smoothly at random, starting each episode
+# from the arm command in the restored state (a harvested walker row carries
+# the walker's arm targets; the arms glide from there into the random motion).
+# Same start-state bank, spawn mixture and per-source curriculum as
+# configs/g1_recover_safetyppo1p.yaml.
+#
+#   python examples/train.py --config configs/g1_recover_armrandom_safetyppo1p.yaml
+#
+# Two curricula run at once and both key on survival: the per-source start
+# difficulty (Curriculum/recover/*) and the arm magnitude (game/dstb_gain ramp x
+# per-env game/dstb_scale). A warm start from a trained
+# g1_stabilize_arm_random* run lets the arm ramp start high (dstb_gain_init).
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_recover_arm_random
+num_envs: 4096
+steps: 2000000000
+seed: 0
+
+# Warm start (same 29-wide head and obs): any g1_stabilize* checkpoint, best a
+# g1_stabilize_arm_random* one.
+# load: runs/g1_stabilize_arm_random/final_model.zip
+
+env_overrides:
+  dataset: null          # null -> data/g1_recover_states.pt or $SAFE_ZOO_G1_RECOVER_DATASET
+  weights: {nominal: 0.15, clean: 0.35, pushed: 0.15, fell: 0.20, synthetic: 0.15}
+  levels: 5
+  band_width: 0.4
+  init_level: 0
+  episode_length_s: 8.0
+
+# --- the random arms' magnitude curriculum (as the arm-random configs) -------
+dstb_gain: 2.0           # final magnitude (the task's registered value)
+dstb_gain_init: 0.0      # at 0 the arms glide from the restored pose to the default and park
+force_ramp_frac: 0.5     # fraction of the run the linear ramp takes
+dstb_per_env_scale: true
+dstb_scale_floor: 0.3
+dstb_scale_init: 0.5
+
+gamma_anneal: true
+
+# --- safety-PPO recipe (as configs/g1_stabilize_armrandom_safetyppo1p.yaml) ---
+lr: 1.0e-4
+adaptive_lr: false
+target_kl: 0.01
+ent_coef: 1.0e-3
+max_std: 0.4
+net: "512,256,128"
+
+# --- action penalties on the PPO loss (as configs/g1_recover_safetyppo1p.yaml,
+# which explains the terms and the calibration). The actor's arm outputs (dims
+# 15..28) are overwritten by the random arms, so there the penalties only drive
+# unused outputs to 0; what they shape is the legs and waist. 0 turns a term off.
+action_rate_coef: 0.05
+action_mag_coef: 0.001
+
+# --- video (see configs/g1_recover_safetyppo1p.yaml for the GL note) ---------
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

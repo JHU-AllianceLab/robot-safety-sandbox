@@ -1,0 +1,26 @@
+# G1 blind flat-terrain velocity walker, FAST command box (mode: cumulative).
+# Same env, reward and recipe as configs/g1_walker_flat.yaml; only the twist
+# command differs: vx in (-0.5, 1.5) m/s and vy in (-0.5, 0.5) m/s, fixed from
+# the first iteration. The stock walker reaches its wide box only through a
+# command curriculum at PPO iteration 5000, which a 5e8 budget barely passes, so
+# in practice it trains on vx in (-0.5, 1.0).
+#   python examples/train.py --config configs/g1_walker_flat_fast.yaml
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_walker_flat_fast  # mode="cumulative" -> the trainer's plain-RL branch
+num_envs: 4096
+# Same starting budget as g1_walker_flat; the faster end of the box is the
+# harder part of the gait, so this is the first knob to raise if 1.5 m/s is
+# still tracked poorly.
+steps: 1000000000
+seed: 0
+
+# --- plain-RL recipe (pinned, as in g1_walker_flat.yaml) ---
+lr: 3.0e-4
+ent_coef: 5.0e-3
+net: "512,256,128"
+video_interval: 200000000
+
+# --- video: 720p, 20 s of real-time motion, written to <run>/videos/ only ---
+video_seconds: 20
+video_fps: 50
+video_wandb: false

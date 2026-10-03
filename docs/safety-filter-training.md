@@ -143,7 +143,14 @@ fails during training — no flag, no wrapper. The base tensor env
 | `safety/failure_rate` | fraction of episodes this window ending in failure |
 | `safety/episodes` | episodes ended this window |
 | `safety/margin_mean`, `safety/margin_min` | the task margin `g` (only when the env computes one) |
+| `safety/reach_rate` | fraction of episodes ended this window that **safely reached** the target: `l ≥ 0` at a step where `g ≥ 0`, with `g ≥ 0` at every earlier step (a later fall does not undo it; an earlier `g < 0` the env did not terminate on does). Tasks with a real target only (not avoid tasks) |
+| `safety/time_to_reach_s` | mean time from episode start to that first safe reach, over the episodes that reached |
 | `safety/engaged_frac` | fraction of env-steps the fallback drove (filtered arm only) |
+
+`safety/failure_rate` is not `1 − reach_rate`. An episode that reaches and
+then falls counts in both, and one that times out without reaching counts in
+neither. The two reach counters, like the failure ones, see an episode only
+when it ends, so before the first timeouts they read pessimistic.
 
 `safety/failures_total` is the headline plot's y-axis. The filtered arm's
 `ep_len_mean` (logged by the learner) is the sanity check: it must sit at the

@@ -1,0 +1,60 @@
+# ReachAvoidPPO1P on g1_waist_reach_arm_random: the REACH half of G1
+# reach-avoid-stay. Same g as the stay task; the target is where the FROZEN stay
+# policy can take over, l = min(l_box, V_stay). Spawns at rest in the default
+# pose, so a goal away from zero waist has to be moved to. See
+# envs/g1_waist/env_cfg.py.
+#
+#   python examples/train.py --config configs/g1_waist_reach_armrandom_reachavoidppo1p.yaml
+#
+# Needs a trained stay run (configs/g1_waist_stay_armrandom_safetyppo1p.yaml).
+# Deploy the two together with examples/eval.py --stay-policy (filters/switch.py).
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_waist_reach_arm_random
+num_envs: 4096
+steps: 2000000000
+seed: 0
+
+env_overrides:
+  stay_run: runs/g1_waist_stay_arm_random   # dir with final_model.zip, or a checkpoint zip
+
+# Warm start WHOLE from the stay policy (same observation layout and head). Its
+# value is an AVOID value, not a reach-avoid one, so the value net is reset and
+# fitted to the frozen actor before any policy gradient.
+# NB the training VIDEO env is built without env_overrides, so it reads the stay
+# run from its default (runs/g1_waist_stay_arm_random, or
+# $SAFE_ZOO_G1_WAIST_STAY_RUN): keep stay_run there or set that variable.
+load: runs/g1_waist_stay_arm_random/final_model.zip
+reset_value: true
+critic_warmup_steps: 20000000
+
+terminal_type: all
+
+# --- the goal's magnitude curriculum (as the stay config) ---------------------
+target_scale_init: 0.0
+target_ramp_frac: 0.5
+
+# --- the random arms' magnitude curriculum (as the stay config) ---------------
+dstb_gain: 1.0
+dstb_gain_init: 0.0
+force_ramp_frac: 0.5
+dstb_per_env_scale: true
+dstb_scale_floor: 0.3
+dstb_scale_init: 0.5
+
+gamma_anneal: true
+
+# --- safety-PPO recipe (as configs/g1_stabilize_armrandom_reachavoidppo1p.yaml)
+lr: 1.0e-4
+adaptive_lr: false
+target_kl: 0.01
+ent_coef: 1.0e-3
+max_std: 0.4
+net: "512,256,128"
+action_rate_coef: 0.05
+action_mag_coef: 0.0
+
+# --- video (as the stay config) -----------------------------------------------
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

@@ -16,6 +16,11 @@ from .tasks import digit_safety as _digit_safety
 from .tasks import go2_crawl as _go2_crawl
 from .tasks import go2_gap as _go2_gap
 from .tasks import go2_stabilize as _go2_stabilize
+from .tasks import g1_stabilize as _g1_stabilize
+from .tasks import g1_arm_adversary as _g1_arm_adversary
+from .tasks import g1_arm_random as _g1_arm_random
+from .tasks import g1_recover as _g1_recover
+from .tasks import g1_waist as _g1_waist
 from .tasks import go2_crawl_twins as _go2_crawl_twins
 from .tasks import go2_gap_brake_or_jump as _go2_gap_brake_or_jump
 from .tasks import go2_filtered as _go2_filtered
@@ -23,11 +28,17 @@ from .tasks import go2_low_bar as _go2_low_bar
 from .tasks import go2_tunnel as _go2_tunnel
 from .tasks import car_goal as _car_goal
 from .tasks import go2_velocity as _go2_velocity
+from .tasks import g1_velocity as _g1_velocity
 
 # safety tasks (margins + safety_sb3 learners)
 _go2_gap.register_all()
 _go2_crawl.register_all()
 _go2_stabilize.register_all()
+_g1_stabilize.register_all()  # the humanoid twin: G1 stand / walk vs an adversarial torso force
+_g1_arm_adversary.register_all()  # same, but the adversary COMMANDS THE ARMS (and pays for self-collision)
+_g1_arm_random.register_all()  # same arm split, single-player: the arms swing at random (curriculum on magnitude)
+_g1_recover.register_all()  # avoid-only fallback spawned from harvested walker / pushed / synthetic states
+_g1_waist.register_all()  # reach-avoid-stay to a waist posture + velocity goal: stay (avoid) and reach (RA) twins
 _digit_safety.register_all()
 _go2_crawl_twins.register_all()
 _go2_gap_brake_or_jump.register_all()  # split test: harvested-state RA vs avoid twins
@@ -38,6 +49,7 @@ _car_goal.register_all()  # bicycle5d analog: diff-drive car reach-avoid (tutori
 # mode="cumulative" task policies (dense reward + stock SB3) — what filters wrap.
 # go2_crawl_walk{,_video} register alongside their safety twins in go2_crawl.
 _go2_velocity.register_all()  # go2_walker_flat: the blind flat-terrain pi_task
+_g1_velocity.register_all()  # g1_walker_flat: the same, on the humanoid
 
 __all__ = [
   "MjlabTensorSafetyEnv", "MjlabNumpySafetyEnv", "build_task_cfg",

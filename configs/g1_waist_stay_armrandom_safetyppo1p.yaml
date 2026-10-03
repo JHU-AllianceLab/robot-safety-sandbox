@@ -1,0 +1,69 @@
+# SafetyPPO1P on g1_waist_stay_arm_random: the STAY half of G1 reach-avoid-stay.
+# Avoid on h = min(g, soft_floor(l_box)): keep the robot upright (g1_stabilize's
+# fall margin) AND inside the goal set -- waist roll/pitch within 0.1 rad of the
+# episode's target, body-frame vx, vy, wz within 0.1 of the (zero) twist
+# command. l_box is soft-floored at -0.5 and a fall is valued at -3, so a fall
+# always scores below a box violation (without that, the first run learned to
+# fall on purpose). Spawns on the goal. The actor owns legs + waist (dims 0..14); the
+# arms (15..28) swing at random. See envs/g1_waist/env_cfg.py.
+#
+#   python examples/train.py --config configs/g1_waist_stay_armrandom_safetyppo1p.yaml
+#
+# Train this FIRST: the reach task's target is this run's certified set
+# (configs/g1_waist_reach_armrandom_reachavoidppo1p.yaml loads it).
+#
+# From scratch: the actor observation is 5 wider than g1_stabilize*'s (base
+# linear velocity + the waist goal, appended at the end), so a --load from those
+# runs would transfer every layer except the input one.
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_waist_stay_arm_random
+num_envs: 4096
+steps: 2000000000
+seed: 0
+
+env_overrides:
+  spawn_waist_noise: 0.05  # rad: waist placed within this of the goal (half the tolerance)
+  spawn_vel_noise: 0.05    # m/s (vx, vy) and rad/s (yaw): spawn base velocity (half the tolerance)
+  spawn_stance_scale: 1.0  # random leg stance at spawn (envs/g1_waist/stance.py); 0 = stock knees-bent pose
+
+# --- the goal's magnitude curriculum -----------------------------------------
+# Goals are drawn from +-scale * 0.4 rad on waist roll and pitch; scale ramps
+# linearly from target_scale_init to 1 over target_ramp_frac of the run. Watch
+# curriculum/waist_target_scale, and Metrics/waist_target/error_waist.
+target_scale_init: 0.0
+target_ramp_frac: 0.5
+
+# --- the random arms' magnitude curriculum (as the arm-random configs) -------
+# Half the arm-random stands' magnitude (the task registers dstb_gain 1.0):
+# waypoints up to +-0.44 rad from the default pose at the shoulders and elbows.
+dstb_gain: 1.0
+dstb_gain_init: 0.0
+force_ramp_frac: 0.5     # fraction of the run the arm ramp takes
+dstb_per_env_scale: true
+dstb_scale_floor: 0.3
+dstb_scale_init: 0.5
+
+gamma_anneal: true
+
+# --- safety-PPO recipe (as configs/g1_recover_armrandom_safetyppo1p.yaml) -----
+lr: 1.0e-4
+adaptive_lr: false
+target_kl: 0.01
+ent_coef: 1.0e-3
+max_std: 0.4
+net: "512,256,128"
+
+# Action-rate penalty on the PPO loss, as the recover configs. NO magnitude
+# penalty: it pulls the action toward the default pose, and holding a 0.4 rad
+# waist goal against gravity takes a waist action of ~2 (the waist's position
+# gain leaves ~0.5 rad of steady-state error at that lean).
+action_rate_coef: 0.05
+action_mag_coef: 0.0
+
+# --- video: 720p, 20 s of real-time motion, written to <run>/videos/ only ------
+# The clip env is built outside the trainer: full goal range and full arm
+# magnitude, not the curriculum's current level.
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

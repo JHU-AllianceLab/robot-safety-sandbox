@@ -261,6 +261,23 @@ def main():
   p.add_argument("--leaderboard-freq", type=int, default=2_000_000,
                  help="env-steps between league evals (was 100k = every ~98 "
                       "vec-steps at 1024 envs -- absurdly frequent)")
+  p.add_argument("--video-seconds", type=float, default=None,
+                 help="clip length in seconds of ROBOT MOTION (resolved against the "
+                      "env's control dt). Default None keeps the historical 300 frames.")
+  p.add_argument("--video-fps", type=int, default=30,
+                 help="playback rate written into the mp4. The velocity cfgs run at "
+                      "50 Hz control, so --video-fps 50 is real time; the 30 default "
+                      "is the historical 0.6x slow motion.")
+  p.add_argument("--video-wandb", action=argparse.BooleanOptionalAction, default=True,
+                 help="also upload each clip to wandb. --no-video-wandb keeps the mp4 "
+                      "local only (a 720p/20s clip is ~5-8 MB against the ~0.3 MB of a "
+                      "320x240/10s one, so a long run's media goes from ~7 MB to ~300 MB).")
+  p.add_argument("--video-herd", type=int, default=-1,
+                 help="how many NEIGHBOR envs to draw beside the tracked one. -1 (default) "
+                      "draws them all, as before; 0 renders a single robot, which is only "
+                      "worth reaching for on a SOFTWARE GL context (see --video-seconds "
+                      "notes in docs/reference/cli.md: on a GPU context a 720p frame is "
+                      "~1 ms and none of this matters).")
   args = merge_config(p)   # parse args; an optional --config sets defaults, CLI overrides
 
   # --- resolve task + learner (2x2: problem from margins, players from --adversary) ---
@@ -318,6 +335,12 @@ def main():
                     adversary=two_player, end_criterion=args.end_criterion,
                     cfg_overrides=args.env_overrides)
   env = _wrap_safety_filter(env, args)
+  if s.kwargs.get("joint_noise") is not None:
+    # The magnitude curriculum of a random-joint task lives in the PPO trainer
+    # (train_on_policy's DstbGainRampCallback wiring); nothing here ramps it.
+    print(f"[random-joints] {args.task}: no magnitude curriculum on the SAC "
+          f"path -- the random joints run at the full dstb_gain="
+          f"{s.kwargs.get('dstb_gain')} from step 0.")
   eff_ec = args.end_criterion if args.end_criterion is not None else s.end_criterion
   print(f"[end-criterion] {args.task} -> {eff_ec}"
         f"{' (override)' if args.end_criterion is not None else ' (task default)'}")
@@ -482,13 +505,20 @@ def main():
     wandb.init(project=args.wandb_project, name=tag, config=vars(args),
                sync_tensorboard=True, save_code=False, reinit=True)
     cbs.append(WandbCallback(verbose=0))
-    _vtask = args.task + "_video"
-    _vtask = _vtask if _vtask in list_tasks() else args.task
-    cbs.append(VideoWandbCallback(
-      lambda: make_tensor(_vtask, 8, args.device, adversary=False,
-                          render_mode="rgb_array",
-                          end_criterion=args.end_criterion),
-      interval=args.video_interval))
+  # Eval clips: an mp4 per interval into <outdir>/videos/, written whether or not
+  # wandb is in use -- only the UPLOAD is conditional (--no-video-wandb, or
+  # --no-wandb). Previously this callback lived inside the wandb block, so
+  # --no-wandb silently meant "no footage at all".
+  _vtask = args.task + "_video"
+  _vtask = _vtask if _vtask in list_tasks() else args.task
+  cbs.append(VideoWandbCallback(
+    lambda: make_tensor(_vtask, 8, args.device, adversary=False,
+                        render_mode="rgb_array",
+                        end_criterion=args.end_criterion),
+    interval=args.video_interval, video_seconds=args.video_seconds,
+    fps=args.video_fps, outdir=outdir,
+    to_wandb=args.video_wandb and not args.no_wandb,
+    herd=None if args.video_herd < 0 else args.video_herd))
 
   model.learn(total_timesteps=args.steps, callback=CallbackList(cbs))
   model.save(os.path.join(outdir, "final_model.zip"))

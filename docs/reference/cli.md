@@ -40,9 +40,15 @@ list. The tables below are curated, not generated.
 | `--adaptive-lr` / `--no-adaptive-lr`, `--desired-kl` | KL-adaptive learning rate |
 | `--gamma`, `--gamma-anneal` / `--no-gamma-anneal` | discount + anneal (anneal OFF for PPO by default) |
 | `--std-floor` / `--std-ceil` / `--reset-log-std` / `--max-std` | action-std control |
+| `--action-rate-coef` / `--action-mag-coef` | action penalties on the PPO loss, on the deterministic action μ(s): rate ‖μ(s_t) − μ(s_{t+1})‖² and magnitude ‖μ(s)‖² (`0` = off, the default). Safety tasks only; unweighted values log as `train/action_rate_loss` / `train/action_mag_loss` |
 | `--l-anneal-steps` / `--l-hold-steps` | reach-set curriculum for warm-started reach-avoid |
+| `--target-scale-init` / `--target-ramp-frac` | goal-magnitude curriculum for a task whose goal command is `ramped` (e.g. `g1_waist_*`): the goal range grows linearly from this fraction of full to all of it over this fraction of the run (defaults 0 and 0.5); logs `curriculum/<term>_scale` |
 | `--norm-freeze-steps` | freeze obs-norm at the start of warm-started runs |
-| `--video-interval N` | env-steps between wandb eval videos |
+| `--video-interval N` | env-steps between eval clips (`0` disables them, and skips building the render env) |
+| `--video-seconds S` | clip length in seconds of robot motion (resolved against the env's control dt); default keeps the historical 300 frames |
+| `--video-fps N` | playback rate written into the mp4. The velocity cfgs run 50 Hz control, so `50` is real time; the `30` default is 0.6x slow motion |
+| `--video-wandb` / `--no-video-wandb` | also upload each clip to wandb. The mp4 is written to `<run>/videos/step_<N>.mp4` either way |
+| `--video-herd N` | neighbour envs drawn beside the tracked one; `-1` (default) draws them all, `0` renders a single robot (~2x faster **on a software GL context** — on a GPU context a 720p frame is ~1 ms and this does not matter; see the render-backend warning in [G1 stabilize](../environments/g1.md#video-clips)) |
 
 !!! warning "`--smoke` is off-policy only"
     There is **no `--smoke` on the on-policy trainer.** Shrink a PPO run with
@@ -74,6 +80,7 @@ Four axes chosen independently (see [evaluation](../guide/evaluation.md)).
 | `--task-policy PATH` | the `π_task` checkpoint being filtered (omit for fallback-only) |
 | `--safety-only` | use the safety policy's own control actor as the task policy |
 | `--safety-policy PATH` | the safety-policy checkpoint (certificate + fallback) |
+| `--stay-policy PATH` (+ `--stay-eps-in` / `--stay-eps-out` / `--stay-task`) | reach-avoid-stay: `--safety-policy` is the reach-avoid twin, this the stay twin; a latched mode hands over when V_stay > eps-in (0.1) and back when V_stay ≤ eps-out (0.0). Needs `--filter value`; turns command surgery off; adds the `ras_*` metrics |
 | `--task-obs-key` / `--safety-obs-key` | override an obs group (auto-detected by default) |
 | `--filter {value,critic,qcbf,rollout,gameplay}` / `--no-filter` | the filter composition, or the control arm |
 | `--eps` | switching threshold (hand over when the monitored margin ≤ eps) |

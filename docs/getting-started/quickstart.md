@@ -18,7 +18,7 @@ No GPU or simulator needed — this just confirms the registry imports:
 python -c "from robot_safety_sandbox import list_tasks; print(list_tasks())"
 ```
 
-You should see a list of ~45 task IDs (`car_goal`, `go2_stabilize`, …). Digit
+You should see a list of ~47 task IDs (`car_goal`, `go2_stabilize`, …). Digit
 tasks warn-and-skip on stock mjlab; that is expected.
 
 ## 2. Smoke-train the tutorial task

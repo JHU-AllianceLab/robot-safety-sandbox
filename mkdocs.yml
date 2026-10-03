@@ -86,6 +86,7 @@ nav:
       - Go2 stabilize and locomotion: environments/go2-stabilize.md
       - Go2 gap-jumping: environments/go2-gap.md
       - Go2 crawl (experimental): environments/go2-crawl.md
+      - G1 stabilize and locomotion: environments/g1.md
       - Digit stabilize: environments/digit.md
   - Tutorials:
       - Build the car-goal task: tutorial-car-goal.md

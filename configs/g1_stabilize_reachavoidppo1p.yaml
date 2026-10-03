@@ -1,0 +1,31 @@
+# ReachAvoidPPO1P on g1_stabilize: M=ReachAvoid (the task's mode), A=PPO
+# (family: on_policy), P=1P (no adversary). The standing twin of
+# configs/g1_locomote_reachavoidppo1p.yaml and the easier of the two — the
+# target is a stance the robot already spawns in, so the value function only has
+# to learn to HOLD it. Start here before the locomotion task.
+#   python examples/train.py --config configs/g1_stabilize_reachavoidppo1p.yaml
+# Add `adversary: true` + `force_max: 100.0` for the two-player ReachAvoidPPO2P
+# game (the robustification channel; the force ramps 8 N -> force_max over 55%
+# of training).
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_stabilize
+num_envs: 2048
+steps: 500000000
+seed: 0
+
+# --- safety-PPO recipe (identical to the Go2's; see that file's notes) ---
+lr: 1.0e-4
+adaptive_lr: false
+target_kl: 0.01
+ent_coef: 1.0e-3
+max_std: 0.4
+net: "512,256,128"
+terminal_type: all
+
+# --- video: 720p, 20 s of real-time motion, written to <run>/videos/ only ---
+# The mp4 is always saved in the run folder; video_wandb: false keeps it OFF
+# wandb (a 720p/20 s clip is ~5-8 MB vs ~0.3 MB for the old 320x240/10 s one,
+# which would take a long run's media from ~7 MB to ~300 MB).
+video_seconds: 20        # seconds of ROBOT MOTION (resolved via the 50 Hz control dt)
+video_fps: 50            # = 1/control-dt -> real-time playback, not 0.6x slow motion
+video_wandb: false       # scalars still go to wandb; only the clip stays local

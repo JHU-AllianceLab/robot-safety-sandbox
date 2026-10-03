@@ -253,7 +253,8 @@ def load_twin(zip_path: str, device: str, quiet: bool = False):
   return model, norm
 
 
-def safety_modules(model, num_envs: int, device: str) -> dict:
+def safety_modules(model, num_envs: int, device: str,
+                   bound: float = 1.0) -> dict:
   """Wire a loaded twin into the callables/modules the filter recipes take.
 
   Every key is keyed off what the twin ACTUALLY has, so an on-policy twin
@@ -271,7 +272,9 @@ def safety_modules(model, num_envs: int, device: str) -> dict:
 
   All of them take the NORMALIZED observation as ``s_obs`` and tolerate extra
   ctx kwargs, matching the ``**ctx`` convention in robot_safety_sandbox.filters.
-  The twin's own bounds are respected: actions are clamped to [-1, 1], and the
+  The twin's own bounds are respected: actions are clamped to [-bound, bound]
+  (default 1; pass the task's bridge ``action_bound`` for a twin trained with a
+  wider box, e.g. the G1 tasks' 3.0), and the
   twin critic is reduced by MIN across the ensemble, which is the conservative
   reading under the zoo's "safe iff >= 0" convention (and the same reduction
   the SAC learners use to form their targets).
@@ -289,7 +292,8 @@ def safety_modules(model, num_envs: int, device: str) -> dict:
 
     def fallback_fn(s_obs, **_):
       with torch.no_grad():
-        return torch.clamp(policy._predict(s_obs, deterministic=True), -1., 1.)
+        return torch.clamp(policy._predict(s_obs, deterministic=True),
+                           -bound, bound)
 
     # A 2P PPO twin keeps its disturbance player on the LEARNER, not the policy
     # (two independent policies, unlike the SAC twins' one joint policy).
@@ -298,12 +302,13 @@ def safety_modules(model, num_envs: int, device: str) -> dict:
       def dstb_fn(s_obs, **_):
         with torch.no_grad():
           return torch.clamp(dstb_policy._predict(s_obs, deterministic=True),
-                             -1., 1.)
+                             -bound, bound)
       out["dstb_fn"] = dstb_fn
   else:                                                     # off-policy twin
     def fallback_fn(s_obs, **_):
       with torch.no_grad():
-        return torch.clamp(policy.actor(s_obs, deterministic=True), -1., 1.)
+        return torch.clamp(policy.actor(s_obs, deterministic=True),
+                           -bound, bound)
 
     dstb_actor = getattr(policy, "dstb_actor", None)
 
@@ -329,7 +334,8 @@ def safety_modules(model, num_envs: int, device: str) -> dict:
     if dstb_actor is not None:
       def dstb_fn(s_obs, **_):
         with torch.no_grad():
-          return torch.clamp(dstb_actor(s_obs, deterministic=True), -1., 1.)
+          return torch.clamp(dstb_actor(s_obs, deterministic=True),
+                             -bound, bound)
       out["dstb_fn"] = dstb_fn
 
   out["fallback_fn"] = fallback_fn

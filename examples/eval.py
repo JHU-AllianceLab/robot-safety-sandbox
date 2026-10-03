@@ -8,6 +8,8 @@ any particular terrain lives here (see robot_safety_sandbox/eval/).
     --task-policy                        the pi_task being filtered
     --safety-policy / --filter           the certificate + which composition
     --dstb  / --dstb-scale               WHO IS ATTACKING, and how hard
+    --stay-policy                        reach-avoid-STAY: a second (stay) twin
+                                         to hand over to once it certifies
 
   # filter gauntlet on flat ground under a swept adversarial attack
   python examples/eval.py --task go2_locomote --adversary \
@@ -24,6 +26,11 @@ any particular terrain lives here (see robot_safety_sandbox/eval/).
   # the unfiltered control arm
   python examples/eval.py ... --no-filter
 
+  python examples/eval.py --task g1_waist_reach_arm_random --safety-only \
+      --safety-policy runs/g1_waist_reach_arm_random/final_model.zip \
+      --stay-policy runs/g1_waist_stay_arm_random/final_model.zip \
+      --num-envs 256 --steps 1000
+
 An attack STRENGTH sweep is the point of --dstb-scale: run the same command at
 0.0 / 0.25 / ... / 1.0 and the result is a curve, not a point.
 """
@@ -31,6 +38,7 @@ An attack STRENGTH sweep is the point of --dstb-scale: run the same command at
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import sys
@@ -50,9 +58,10 @@ except ImportError:
 
 from robot_safety_sandbox import list_tasks, spec  # noqa: E402
 from robot_safety_sandbox.eval import (  # noqa: E402
-  FILTERS, NominalPolicy, RolloutCfg, SwitchCfg, TwinNominal,
-  TrajectoryRecorder, TwistCommandSurgery, VideoRecorder, ZeroNominal,
-  build_eval_env, build_filter, list_presets, load_nominal, load_twin,
+  FILTERS, NominalPolicy, ReachAvoidStayStats, RolloutCfg, SwitchCfg,
+  SwitchedTwinNominal, TwinNominal, TrajectoryRecorder, TwistCommandSurgery,
+  VideoRecorder, ZeroNominal, build_eval_env, build_filter,
+  build_reach_avoid_stay_filter, list_presets, load_nominal, load_twin,
   make_dstb, preset, protocol_metrics, run_eval, safety_modules)
 from robot_safety_sandbox.eval.metrics import MetricSet  # noqa: E402
 
@@ -121,6 +130,23 @@ def build_parser(pre_args):
                  help="which COMPOSITION to deploy; they differ in one module "
                       "each: " + " | ".join(f"{k}: {v}"
                                             for k, v in FILTERS.items()))
+  p.add_argument("--stay-policy", default=None,
+                 help="REACH-AVOID-STAY: the STAY twin (avoid on the stay "
+                      "constraint, e.g. g1_waist_stay_arm_random). --safety-"
+                      "policy is then the REACH-AVOID twin. Each phase is a "
+                      "value filter and a latched per-env mode switches "
+                      "between them on V_stay (filters/switch.py); needs "
+                      "--filter value. Command surgery is off in this mode.")
+  p.add_argument("--stay-eps-in", type=float, default=0.1,
+                 help="--stay-policy: hand over to the stay phase when "
+                      "V_stay > this")
+  p.add_argument("--stay-eps-out", type=float, default=0.0,
+                 help="--stay-policy: hand back to the reach phase when "
+                      "V_stay <= this (<= --stay-eps-in)")
+  p.add_argument("--stay-task", default=None,
+                 help="--stay-policy: the task whose margin_fn is the stay "
+                      "constraint, measured live for ras_hold_rate (default: "
+                      "--task with '_reach' -> '_stay', when registered)")
   p.add_argument("--no-filter", action="store_true",
                  help="CONTROL arm: run the task policy unfiltered")
   p.add_argument("--eps", type=float, default=0.0,
@@ -225,6 +251,14 @@ def main():
 
   # 1. THE ENVIRONMENT ---------------------------------------------------------
   overrides = _parse_overrides(args.env_override)
+  if args.stay_policy:
+    if args.filter != "value":
+      raise SystemExit("--stay-policy composes two VALUE filters; use "
+                       "--filter value (the default).")
+    # a task whose target is built from the stay twin (g1_waist_reach_*) must
+    # read the SAME twin the switch hands over to
+    if "stay_run" in inspect.signature(spec(args.task).cfg_builder).parameters:
+      overrides.setdefault("stay_run", args.stay_policy)
   env = build_eval_env(
     args.task, args.num_envs, device, adversary=args.adversary,
     env_overrides=overrides, end_criterion=args.end_criterion,
@@ -238,19 +272,34 @@ def main():
         + (f" preset={args.preset}" if ps else ""))
 
   # 2. THE SAFETY FILTER -------------------------------------------------------
+  # The reach-avoid-stay path clamps the twins to the task's own action box
+  # (the G1 tasks train at +-3); the single-twin path keeps its historical +-1.
+  bound = float(env.bridge.action_bound) if args.stay_policy else 1.0
   safety_model, norm = load_twin(args.safety_policy, device)
-  mods = safety_modules(safety_model, env.num_envs, device)
+  mods = safety_modules(safety_model, env.num_envs, device, bound=bound)
   mods["norm"] = norm
-  bundle = build_filter(
-    args.filter, mods, env,
-    switch=SwitchCfg(eps=args.eps, smoothing=args.smoothing,
+  switch = SwitchCfg(eps=args.eps, smoothing=args.smoothing,
                      caution=args.caution, hysteresis=args.hysteresis,
-                     rest_speed=args.rest_speed),
-    rollout=RolloutCfg(horizon=args.horizon, rollouts=args.rollouts,
-                       recertify_every=args.recertify_every,
-                       contact_history=args.contact_history),
-    kappa=args.kappa)
-  print(f"[filter] {args.filter}: {FILTERS[args.filter]}"
+                     rest_speed=args.rest_speed)
+  if args.stay_policy:
+    stay_model, stay_norm = load_twin(args.stay_policy, device)
+    stay_mods = safety_modules(stay_model, env.num_envs, device, bound=bound)
+    stay_mods["norm"] = stay_norm
+    bundle = build_reach_avoid_stay_filter(
+      mods, stay_mods, env, switch=switch, eps_in=args.stay_eps_in,
+      eps_out=args.stay_eps_out)
+    # each phase normalizes with its own twin's statistics (see the builder)
+    norm = lambda obs: obs.float()  # noqa: E731
+  else:
+    bundle = build_filter(
+      args.filter, mods, env, switch=switch,
+      rollout=RolloutCfg(horizon=args.horizon, rollouts=args.rollouts,
+                         recertify_every=args.recertify_every,
+                         contact_history=args.contact_history),
+      kappa=args.kappa)
+  print(f"[filter] {'reach-avoid-stay' if args.stay_policy else args.filter}: "
+        + ("two value filters under a latched mode" if args.stay_policy
+           else FILTERS[args.filter])
         + (" (NOT APPLIED: --no-filter control arm)" if args.no_filter else ""))
 
   # 3. THE TASK POLICY ---------------------------------------------------------
@@ -258,7 +307,13 @@ def main():
     raise SystemExit("--task-policy and --safety-only are alternatives: the "
                      "task policy is either an external pi_task or the safety "
                      "policy's own control actor, not both.")
-  if args.safety_only:
+  if args.safety_only and args.stay_policy:
+    print(f"[task-policy] the switched controller's own actors: "
+          f"{mods['twin']} in REACH, {stay_mods['twin']} in STAY")
+    task_policy = SwitchedTwinNominal(bundle.filt,
+                                      bundle.extras["reach_fallback_fn"],
+                                      bundle.extras["stay_fallback_fn"])
+  elif args.safety_only:
     print(f"[task-policy] the safety policy's own control actor "
           f"({mods['twin']})")
     task_policy = TwinNominal(mods["fallback_fn"], norm)
@@ -289,6 +344,18 @@ def main():
 
   # 5. THE METRICS -------------------------------------------------------------
   metrics = protocol_metrics(env, bundle.filt)
+  if args.stay_policy:
+    stay_task = args.stay_task or args.task.replace("_reach", "_stay")
+    constraint_fn = None
+    if stay_task in list_tasks():
+      stay_margin = spec(stay_task).margin_fn
+      constraint_fn = lambda mj: stay_margin(mj)[0]  # noqa: E731
+      print(f"[ras] stay constraint for ras_hold_rate: {stay_task}'s margin")
+    else:
+      print(f"[ras] no stay task {stay_task!r} registered: ras_hold_rate "
+            f"not measured (pass --stay-task)")
+    metrics = MetricSet(metrics, ReachAvoidStayStats(
+      bundle.filt, env.num_envs, env.device, env.mj.step_dt, constraint_fn))
   if ps and ps.metrics:
     extra = ps.metrics(args, env)
     if extra is not None:
@@ -303,7 +370,11 @@ def main():
                                            frame=args.traj_frame))
 
   surgery = None
-  if not args.no_command_surgery:
+  if args.stay_policy:
+    # the twist command IS the goal's velocity half here; never drive it
+    print("[command-surgery] off: --stay-policy (the command is part of the "
+          "goal)")
+  elif not args.no_command_surgery:
     surgery = TwistCommandSurgery(cmd_vx=args.cmd_vx,
                                   engaged_cmd_vx=args.engaged_cmd_vx).bind(env)
     if not surgery.available:
@@ -323,6 +394,7 @@ def main():
     filter="off" if args.no_filter else os.path.basename(
       os.path.dirname(os.path.abspath(args.safety_policy))),
     safety_policy=mods["twin"], steps=args.steps, num_envs=args.num_envs,
+    stay_policy=args.stay_policy,
     dstb=args.dstb, dstb_scale=args.dstb_scale, seed=args.seed, tag=args.tag)
   if bundle.shadow is not None:
     summary["certifications"] = bundle.shadow.seeds

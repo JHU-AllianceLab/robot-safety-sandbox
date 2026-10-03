@@ -11,6 +11,10 @@ evaluation stack.
   rollout   RolloutMonitor     H shadow-sim steps       any twin
   gameplay  AdversarialRolloutMonitor  the same, played against pi_dstb  2P twin
 
+Reach-avoid-stay is not a sixth row: it composes TWO value filters (a reach-avoid
+twin and a stay twin) under a latched mode, see
+:func:`build_reach_avoid_stay_filter`.
+
 A shadow rollout must certify THE WORLD BEING FILTERED, so the shadow bridge is
 built from the live env's own ``cfg_builder`` (which already carries any preset
 surgery) rather than from the task's stock one.
@@ -237,3 +241,45 @@ def build_filter(kind: str, mods: dict, env, *, switch: SwitchCfg | None = None,
     filt = F.rollout_filter(n, device, mods["fallback_fn"], shadow,
                             rollout.horizon, **common)
   return FilterBundle(filt, shadow=shadow, shadow_bridge=bridge)
+
+
+def build_reach_avoid_stay_filter(reach: dict, stay: dict, env, *,
+                                  switch: SwitchCfg | None = None,
+                                  eps_in: float = 0.1,
+                                  eps_out: float = 0.0) -> FilterBundle:
+  """Reach-avoid-stay: a value filter per phase and a latched mode between
+  them (:class:`~robot_safety_sandbox.filters.ReachAvoidStayFilter`).
+
+  :param reach: the REACH-AVOID twin's :func:`safety_modules` output plus its
+      ``"norm"``.
+  :param stay: the same for the STAY twin (avoid on the stay constraint); its
+      value is also the switching certificate.
+  :param eps_in / eps_out: enter STAY when V_stay > eps_in, leave it when
+      V_stay <= eps_out.
+
+  The two twins normalize observations with their own statistics, so each
+  callable here applies its twin's ``norm`` itself: the filter takes the RAW
+  observation as ``s_obs``, and ``run_eval`` must be given an identity norm.
+  ``extras`` carries the wrapped fallbacks (``reach_fallback_fn``,
+  ``stay_fallback_fn``) for a nominal that drives with them.
+  """
+  switch = switch or SwitchCfg()
+  n, device = env.num_envs, env.device
+
+  def own(mods, key):
+    fn, norm = _need(mods, key, "reach-avoid-stay"), mods["norm"]
+    return lambda s_obs, **_: fn(s_obs=norm(s_obs))
+
+  print(f"[filter] reach-avoid-stay: REACH {reach.get('twin')} | STAY "
+        f"{stay.get('twin')} | enter STAY at V_stay > {eps_in}, leave at "
+        f"V_stay <= {eps_out}; each phase: value monitor, "
+        f"{switch.describe()}")
+  phase = {name: F.safety_value_filter(n, device, own(m, "value_fn"),
+                                       own(m, "fallback_fn"), **switch.kwargs())
+           for name, m in (("reach", reach), ("stay", stay))}
+  filt = F.ReachAvoidStayFilter(phase["reach"], phase["stay"],
+                                own(stay, "value_fn"),
+                                eps_in=eps_in, eps_out=eps_out)
+  return FilterBundle(filt, extras={
+    "reach_fallback_fn": own(reach, "fallback_fn"),
+    "stay_fallback_fn": own(stay, "fallback_fn")})

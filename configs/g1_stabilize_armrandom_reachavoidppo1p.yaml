@@ -1,0 +1,61 @@
+# ReachAvoidPPO1P on g1_stabilize_arm_random: M=ReachAvoid (the task's mode),
+# A=PPO (family: on_policy), P=1P (no adversary). The stepping stone between
+# configs/g1_stabilize_reachavoidppo1p.yaml (arms parked) and
+# configs/g1_stabilize_armadv_reachavoidppo2p.yaml (a learned adversary owns the
+# arms): the same arm split, but the arms (action dims 15..28) swing SMOOTHLY AT
+# RANDOM (minimum-jerk glides between random waypoints, 0.5-2 s per segment) and
+# the actor, which keeps the legs and waist, learns to hold its stance anyway.
+#
+#   python examples/train.py --config configs/g1_stabilize_armrandom_reachavoidppo1p.yaml
+#
+# Trains from scratch. It can also warm-start WHOLE from a g1_stabilize run (same
+# 29-wide head, same obs, same margins), and its checkpoint in turn warm-starts
+# g1_stabilize_arm_adv:  ... --load runs/g1_stabilize/final_model.zip
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_stabilize_arm_random
+num_envs: 4096
+steps: 4000000000
+seed: 0
+
+# --- the random arms' MAGNITUDE curriculum -----------------------------------
+# dstb_gain is the half-width of the random waypoint range in the actor's own
+# action units (then mjlab's per-joint G1_ACTION_SCALE: 0.44 rad/unit at the
+# shoulders, elbows and wrist roll). 2.0 = waypoints up to +-0.88 rad from the
+# default pose; the shoulder roll only swings OUTWARD (see tasks/g1_arm_random.py
+# for the measured reason). The segment durations are fixed, so a larger
+# magnitude is also a faster swing: the ramp hardens amplitude and speed together.
+dstb_gain: 2.0           # final magnitude (the task's registered value)
+dstb_gain_init: 0.0      # magnitude at step 0 = arms parked, i.e. g1_stabilize
+force_ramp_frac: 0.5     # fraction of the run the linear ramp takes (shared knob)
+
+# Per-env survival curriculum ON TOP of the ramp: each env's multiplier moves
+# +0.05 when its episode survives and -0.05 when it falls, clamped to
+# [floor, 1]. Effective magnitude = ramp(t) x per-env scale, so an env where the
+# robot keeps falling backs its arms off instead of drowning the batch in falls
+# once the ramp saturates. Watch game/dstb_gain (the ramp), game/dstb_scale_mean
+# (-> 1.0 = the actor has caught up with the full magnitude) and
+# game/dstb_scale_at_floor (near 1.0 = failing even at the floor -> slow the
+# ramp: raise force_ramp_frac, or lower dstb_gain).
+dstb_per_env_scale: true
+dstb_scale_floor: 0.3
+dstb_scale_init: 0.5
+
+gamma_anneal: true
+
+# --- safety-PPO recipe (as g1_stabilize_reachavoidppo1p.yaml) ------------------
+lr: 1.0e-4
+adaptive_lr: false
+target_kl: 0.01
+ent_coef: 1.0e-3
+max_std: 0.4
+net: "512,256,128"
+terminal_type: all
+
+# --- video: 720p, 20 s of real-time motion, written to <run>/videos/ only ------
+# NB the clip env is built outside the trainer, so it runs the arms at the FULL
+# magnitude (dstb_gain above), not at the curriculum's current level: early
+# clips show the target difficulty the policy has not reached yet.
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

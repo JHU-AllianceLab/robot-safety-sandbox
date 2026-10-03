@@ -1,0 +1,95 @@
+# ReachAvoidPPO2P on g1_stabilize_arm_adv: M=ReachAvoid (the task's mode), A=PPO
+# (family: on_policy), P=2P (adversary: true). The robustification step PAST
+# configs/g1_stabilize_reachavoidppo1p.yaml and past the wrench-adversary 2P run:
+# here the adversary does not push the torso, it OWNS THE ARMS (action dims
+# 15..28) while the actor keeps the legs and waist, and it is penalized for
+# driving those arms into the robot's own body.
+#
+#   python examples/train.py --config configs/g1_stabilize_armadv_reachavoidppo2p.yaml
+#
+# WARM-START FROM THE WRENCH-ADVERSARY RUN. This is the intended entry point and
+# the reason the actor keeps a 29-wide head here: the trained g1_stabilize policy
+# transfers WHOLE (trunk, action head and log_std), so the run starts from a
+# controller that already stands against a worst-case push and only has to learn
+# to stand against its own arms. Keep `net:` equal to that run's, and pass the
+# checkpoint plus its normalizer:
+#
+#   ... --load runs/g1_stabilize_ppo_adv/g1_stabilize_adv/final_model.zip
+#
+# The trainer reports how many tensors transferred and fails loud if none did; it
+# also requires the run's tensornormalize.pt to sit beside the checkpoint.
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_stabilize_arm_adv
+adversary: true          # the P: -> ReachAvoidPPO2P. WITHOUT it the arms sit at
+                         # the default pose and the task is bit-identical to
+                         # g1_stabilize — that 1P run is the honest baseline.
+num_envs: 4096
+steps: 800000000
+seed: 0
+
+# --- the arm adversary's authority curriculum ---------------------------------
+# dstb_mode="joint" has no external wrench, so force_max / the per-env force
+# curriculum are not read at all (the trainer skips their callbacks and says so).
+# The knob here is the adversary's JOINT authority: 1.0 = exactly the per-joint
+# authority the actor has, since mjlab's per-joint G1_ACTION_SCALE applies to
+# both players alike. Same reason as the force ramp for starting low — an
+# adversary handed full authority at step 0 just throws the robot down every
+# episode, the actor never sees a survivable state, and the game freezes with no
+# gradient.
+dstb_gain: 1.0           # final authority
+dstb_gain_init: 0.1      # authority at step 0
+force_ramp_frac: 0.55    # fraction of the run the ramp takes (shared knob)
+dstb_pretrain: 20        # rollouts the adversary trains alone before alternating
+
+# Per-env survival curriculum on top of the ramp: each env's authority multiplier
+# moves +0.05 when its episode survives and -0.05 when it falls, clamped to
+# [floor, 1], so each env settles near the arm strength the robot survives ~half
+# the time. Effective authority = ramp(t) x per-env scale. Without it (the first
+# arm run, runs/g1_stabilize_arm_adv) the training failure rate sat at ~0.9 for
+# the whole second half: once the ramp hit 1.0 nothing backed the adversary off.
+# Watch game/dstb_scale_mean (climbing to 1.0 = the actor caught up with full-
+# authority arms) and game/dstb_scale_at_floor (near 1.0 = losing even at the
+# floor -> lower dstb_scale_floor).
+dstb_per_env_scale: true
+dstb_scale_floor: 0.3
+dstb_scale_init: 0.5
+
+# --- safety-PPO recipe (as g1_stabilize_reachavoidppo1p.yaml) ------------------
+lr: 1.0e-4
+adaptive_lr: false
+ent_coef: 1.0e-3
+max_std: 0.4
+net: "512,256,128"       # keep equal to the run you --load from
+terminal_type: all
+
+# --- MATCHED TO THE WARM-START SOURCE -----------------------------------------
+# These two are NOT the shipped g1_stabilize_reachavoidppo1p.yaml values (0.01 /
+# absent). They are the values runs/g1_stabilize_ppo_adv WAS TRAINED WITH, and
+# they are here because this config exists to CONTINUE that run. Change them and
+# you are re-fitting the loaded critic from scratch.
+target_kl: 0.03
+# gamma_anneal is OFF by default on the on-policy path — the trainer's own help
+# warns it destabilizes PPO's GAE value (car_goal E064: value_loss -> 1e5, EV < 0).
+# It is ON here because the checkpoint this config loads was trained with it: its
+# critic was fit at the annealed endpoint gamma = 0.9999, i.e. a ~10,000-step
+# horizon. Running the warm start at the fixed 0.99 default would hand that value
+# head a ~100-step horizon instead — a 100x mismatch, and the likeliest reason a
+# warm start "forgets everything".
+#
+# The car_goal warning did not bite on this task: in runs/g1_stabilize_ppo_adv the
+# value loss DID spike (peak 6299) but converged to 0.0047 with explained_variance
+# 0.92 at 500M. Watch train/value_loss and train/explained_variance early; if the
+# value net does diverge here, set `gamma_anneal: false` and `gamma: 0.999` (a
+# fixed long horizon, the trainer's recommended reach-avoid alternative).
+#
+# NB the schedule RESTARTS at 0.99 for this run — a fresh learner does not resume
+# the source's anneal — so the critic still sees a horizon transient early on
+# either way. The actor is the part that transfers cleanly.
+gamma_anneal: true
+
+# --- video: 720p, 20 s of real-time motion, written to <run>/videos/ only ------
+# NB the eval clip env is built WITHOUT the adversary, so the clip shows the
+# actor holding its stance with the arms parked, not the game being played.
+video_seconds: 20
+video_fps: 50
+video_wandb: false

@@ -1,0 +1,86 @@
+# SafetyPPO2P on g1_recover_arm_random_wrench: M=Safety (avoid-only), A=PPO,
+# P=2P (adversary: true). The stage after configs/g1_recover_armrandom_safetyppo1p.yaml:
+# the same start-state bank, spawn mixture and per-source curriculum (episodes
+# open on the walker mid-gait, just pushed, or a moment before it fell), the same
+# random arms (dims 15..28) and the same action penalties -- plus a LEARNED
+# worst-case wrench on torso_link, brought up by a force curriculum.
+#
+#   python examples/train.py --config configs/g1_recover_armrandom_wrench_safetyppo2p.yaml \
+#       --out runs/g1_recover_armrandom_wrench
+#
+# The two disturbances ride separate channels: the arms stay the scripted joint
+# slice (dstb_gain x dstb_scale), the adversary picks a 3-dim force DIRECTION
+# and the bridge applies it at force_max(t) x the per-env force_scale.
+#
+# WARM START from the regularized random-arm recover run: same 29-wide head, same
+# obs, same backup, so the actor, critic and log_std transfer whole and only the
+# adversary starts fresh. The trainer needs the run's tensornormalize.pt beside
+# the checkpoint (it is there) and fails loud if no actor tensor moved.
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_recover_arm_random_wrench
+adversary: true          # the P: -> SafetyPPO2P. Without it this is g1_recover_arm_random.
+num_envs: 4096
+steps: 1000000000
+seed: 0
+
+load: runs/g1_recover_armrandom_reg/g1_recover_arm_random/final_model.zip
+
+# The spawn's knobs, as the warm-start run (envs/g1_recover/env_cfg.py). The
+# per-source levels restart at 0; a warm policy climbs them in a few episodes
+# per env (a timeout promotes), and a fall under the wrench demotes as before.
+env_overrides:
+  dataset: null          # null -> data/g1_recover_states.pt or $SAFE_ZOO_G1_RECOVER_DATASET
+  weights: {nominal: 0.15, clean: 0.35, pushed: 0.15, fell: 0.20, synthetic: 0.15}
+  levels: 5
+  band_width: 0.4
+  init_level: 0
+  episode_length_s: 8.0
+
+# --- the wrench adversary's force curriculum ----------------------------------
+# Global ramp 8 N -> force_max over force_ramp_frac of the run
+# (ForceRampCallback), times a per-env survival scale that moves +0.05 on a
+# survived episode and -0.05 on a fall, clamped to [force_floor, 1]
+# (PerEnvForceScaleCallback) -> step 0 delivers 8 x 0.5 = 4 N. The force is
+# SUSTAINED every step in the direction the adversary picks. 15 N is what
+# runs/g1_stabilize_ppo_adv trained against (it settled at force_scale_mean ~0.7,
+# failure_rate ~0.2); raise it in a follow-up warm start once
+# game/force_scale_mean sits near 1.0. game/force_scale_at_floor near 1.0 = losing
+# even at the floor -> lower force_max or force_floor.
+force_max: 15.0
+force_ramp_frac: 0.5
+force_init: 0.5
+force_floor: 0.3
+dstb_pretrain: 20        # rollouts the adversary trains alone before alternating
+
+# --- the random arms: full magnitude from step 0 ------------------------------
+# The warm-start run ended at game/dstb_gain 2.0 with game/dstb_scale_mean 0.99,
+# i.e. full-magnitude arms in every env. Hold them there, so the wrench's
+# per-env curriculum is the only one reacting to falls (with both on, a fall
+# would also back the arms off, and the arms would stop being a fixed condition).
+dstb_gain: 2.0
+dstb_gain_init: 2.0      # = dstb_gain: the arm ramp is flat
+dstb_per_env_scale: false
+
+gamma_anneal: true       # as the warm-start run; its critic was fit with it
+
+# --- safety-PPO recipe (as the warm-start run) --------------------------------
+lr: 1.0e-4
+adaptive_lr: false
+target_kl: 0.01
+ent_coef: 1.0e-3
+max_std: 0.4
+net: "512,256,128"       # keep equal to the run you load from
+
+# --- action penalties on the PPO loss (as the warm-start run) -----------------
+# The CONTROL player's update only: safety_sb3 skips them on the adversary's
+# update (ppo_base._action_penalties_active).
+action_rate_coef: 0.05
+action_mag_coef: 0.001
+
+# --- video (see configs/g1_recover_safetyppo1p.yaml for the GL note) ---------
+# NB the clip env is built WITHOUT the adversary: it shows the random arms, not
+# the wrench.
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

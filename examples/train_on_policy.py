@@ -51,11 +51,15 @@ from _run_config import dump_config, merge_config  # noqa: E402  (examples/ sibl
 from robot_safety_sandbox import (  # noqa: E402
   CUMULATIVE, algo_name, list_tasks, make_tensor, spec)
 from robot_safety_sandbox.callbacks import (  # noqa: E402
+  DstbGainRampCallback,
+  DstbPhaseCallback,
   ForceRampCallback,
   FwdForceAnnealCallback,
   GaitThreshRampCallback,
   LAnnealCallback,
   PerEnvForceScaleCallback,
+  TargetScaleRampCallback,
+  CriticWarmupCallback,
   NormFreezeCallback,
   StdFloorCallback,
   TensorNormSaveCallback,
@@ -95,7 +99,12 @@ _SAFETY_ONLY = (
   "l_hold_steps", "adaptive_lr", "desired_kl", "max_std", "std_floor",
   "std_ceil", "target_kl", "reset_value", "fwd_force", "force_max",
   "force_ramp_frac", "force_floor", "force_init", "dstb_pretrain",
-  "norm_freeze_steps",
+  "dstb_gain", "dstb_gain_init", "dstb_per_env_scale", "dstb_scale_floor",
+  "dstb_scale_init", "norm_freeze_steps", "target_scale_init",
+  "target_ramp_frac",
+  # safety_sb3 loss terms; stock SB3 PPO has no such knob, and a cumulative
+  # task's dense reward already carries its own action_rate_l2 term.
+  "action_rate_coef", "action_mag_coef",
 )
 
 
@@ -116,7 +125,8 @@ def _train_cumulative(args, outdir):
 
   from robot_safety_sandbox import make_numpy
   from robot_safety_sandbox.callbacks import (
-    DenseMetricsCallback, DenseVideoWandbCallback, VecNormSaveCallback)
+    CriticWarmupCallback, DenseMetricsCallback, DenseVideoWandbCallback,
+    VecNormSaveCallback)
 
   print(f"[algo] {args.task} mode={CUMULATIVE} -> PPO (stock stable_baselines3)")
   # numpy bridge, auto-dense for cumulative tasks (reward = the env's dense
@@ -175,19 +185,30 @@ def _train_cumulative(args, outdir):
     # per-term reward / termination breakdown (env/*) from the bridge metrics().
     DenseMetricsCallback(),
   ]
+  if args.critic_warmup_steps > 0:
+    # Same knob as the safety branch: hold the actor while a reset critic catches
+    # up. Wired here too so the flag is never a silent no-op on a cumulative run.
+    cbs.append(CriticWarmupCallback(args.critic_warmup_steps))
   if not args.no_wandb:
     import wandb
     from wandb.integration.sb3 import WandbCallback
     wandb.init(project=args.wandb_project, name=args.task, config=vars(args),
                sync_tensorboard=True, save_code=False, reinit=True)
     cbs.append(WandbCallback(verbose=0))
-    # Eval clips: a "<task>_video" packed-terrain herd variant if registered
-    # (auto-dense: no force / no safety hook -> the unaided policy).
-    _vtask = args.task + "_video"
-    _vtask = _vtask if _vtask in list_tasks() else args.task
-    cbs.append(DenseVideoWandbCallback(
-      lambda: make_tensor(_vtask, 8, args.device, render_mode="rgb_array"),
-      interval=args.video_interval))
+  # Eval clips: an mp4 per interval into <outdir>/videos/, written whether or not
+  # wandb is in use -- only the UPLOAD is conditional (--no-video-wandb, or
+  # --no-wandb). Previously this callback lived inside the wandb block, so
+  # --no-wandb silently meant "no footage at all".
+  # A "<task>_video" packed-terrain herd variant is used if registered
+  # (auto-dense: no force / no safety hook -> the unaided policy).
+  _vtask = args.task + "_video"
+  _vtask = _vtask if _vtask in list_tasks() else args.task
+  cbs.append(DenseVideoWandbCallback(
+    lambda: make_tensor(_vtask, 8, args.device, render_mode="rgb_array"),
+    interval=args.video_interval, video_seconds=args.video_seconds,
+    fps=args.video_fps, outdir=outdir,
+    to_wandb=args.video_wandb and not args.no_wandb,
+    herd=None if args.video_herd < 0 else args.video_herd))
 
   model.learn(total_timesteps=args.steps, callback=CallbackList(cbs))
   model.save(os.path.join(outdir, "final_model.zip"))   # plain SB3 zip
@@ -290,6 +311,40 @@ def main():
   p.add_argument("--fwd-force", type=float, default=15.0,
                  help="crawl: start magnitude (N) of the forward-current force, "
                       "annealed to 0 over the run")
+  # JOINT-partition adversaries (dstb_mode="joint", e.g. g1_stabilize_arm_adv):
+  # the adversary drives a slice of the robot's OWN actuators, so there is no
+  # external wrench to bound -- force-max and the per-env force curriculum are
+  # skipped for these tasks and this gain is the authority knob instead. It is
+  # ramped over the same --force-ramp-frac of the run.
+  p.add_argument("--dstb-gain", type=float, default=None,
+                 help="joint-mode adversary: final joint authority (default: "
+                      "the task's registered dstb_gain). 1.0 = the same "
+                      "per-joint authority the actor has.")
+  p.add_argument("--dstb-gain-init", type=float, default=0.1,
+                 help="joint-mode adversary: joint authority at step 0")
+  # Per-env survival curriculum for a joint-mode adversary -- the twin of the
+  # wrench's --force-floor/--force-init. Each env's authority multiplier moves
+  # +0.05 when its episode survives and -0.05 when it fails, clamped to
+  # [floor, 1], ON TOP of the global dstb_gain ramp. ON by default;
+  # --no-dstb-per-env-scale reproduces runs made before it existed.
+  p.add_argument("--dstb-per-env-scale", action=argparse.BooleanOptionalAction,
+                 default=True,
+                 help="joint-mode adversary: per-env survival curriculum on "
+                      "its authority (default on)")
+  p.add_argument("--dstb-scale-floor", type=float, default=0.3,
+                 help="joint-mode adversary: per-env authority multiplier floor")
+  p.add_argument("--dstb-scale-init", type=float, default=0.5,
+                 help="joint-mode adversary: per-env authority multiplier at "
+                      "step 0")
+  # GOAL-magnitude curriculum, for tasks whose goal command marks itself
+  # ``ramped`` (e.g. g1_waist_*'s waist_target): its sampling range grows
+  # linearly from this fraction of the full range to all of it.
+  p.add_argument("--target-scale-init", type=float, default=0.0,
+                 help="ramped goal command: fraction of the full goal range "
+                      "sampled at step 0")
+  p.add_argument("--target-ramp-frac", type=float, default=0.5,
+                 help="ramped goal command: fraction of the run over which the "
+                      "goal range grows to its full size")
   p.add_argument("--dstb-pretrain", type=int, default=20,
                  help="2P dstb-pretrain ROLLOUTS (keep << total rollouts)")
   p.add_argument("--lr", type=float, default=5e-4)
@@ -337,11 +392,48 @@ def main():
                       "(safety: 128,128,128)")
   p.add_argument("--vf-coef", type=float, default=0.5,
                  help="value loss coefficient (rsl_rl safety uses 1.0)")
+  # The safety reward IS the margin g, so action costs cannot go on the reward
+  # without changing what V certifies; these ride on the PPO loss instead, on the
+  # policy's deterministic action mu(s). Both are raw action units, summed over
+  # the action dims; the unweighted values log as train/action_rate_loss and
+  # train/action_mag_loss.
+  p.add_argument("--action-rate-coef", type=float, default=0.0,
+                 help="weight of the action-rate penalty on the PPO loss, "
+                      "||mu(s_t) - mu(s_{t+1})||^2 over consecutive steps of one "
+                      "episode (0 = off)")
+  p.add_argument("--action-mag-coef", type=float, default=0.0,
+                 help="weight of the action-magnitude penalty on the PPO loss, "
+                      "||mu(s)||^2: for a joint-position action, a pull toward the "
+                      "default pose (0 = off)")
   p.add_argument("--video-interval", type=int, default=5_000_000,
                  help="env-steps between wandb eval videos (~2k rollouts at "
                       "2560 envs); frequent clips make regressions visible early")
+  p.add_argument("--video-seconds", type=float, default=None,
+                 help="clip length in seconds of ROBOT MOTION (resolved against the "
+                      "env's control dt). Default None keeps the historical 300 frames.")
+  p.add_argument("--video-fps", type=int, default=30,
+                 help="playback rate written into the mp4. The velocity cfgs run at "
+                      "50 Hz control, so --video-fps 50 is real time; the 30 default "
+                      "is the historical 0.6x slow motion.")
+  p.add_argument("--video-wandb", action=argparse.BooleanOptionalAction, default=True,
+                 help="also upload each clip to wandb. --no-video-wandb keeps the mp4 "
+                      "local only (a 720p/20s clip is ~5-8 MB against the ~0.3 MB of a "
+                      "320x240/10s one, so a long run's media goes from ~7 MB to ~300 MB).")
+  p.add_argument("--video-herd", type=int, default=-1,
+                 help="how many NEIGHBOR envs to draw beside the tracked one. -1 (default) "
+                      "draws them all, as before; 0 renders a single robot, which is only "
+                      "worth reaching for on a SOFTWARE GL context (see --video-seconds "
+                      "notes in docs/reference/cli.md: on a GPU context a 720p frame is "
+                      "~1 ms and none of this matters).")
   p.add_argument("--norm-freeze-steps", type=int, default=5_000_000,
                  help="freeze obs-norm updates at the start of WARM-STARTED runs")
+  p.add_argument("--critic-warmup-steps", type=int, default=0,
+                 help="freeze the ACTOR for the first N env-steps so a reset critic "
+                      "(--reset-value) fits the inherited policy before any policy "
+                      "gradient is taken. The actor keeps ACTING -- only its weights "
+                      "and log_std are held -- so the value net learns V^pi on-policy. "
+                      "0 (default) = off. Watch train/explained_variance: past ~0.7 the "
+                      "critic is tracking returns. Warm-started runs only.")
   p.add_argument("--device", default="cuda:0")
   p.add_argument("--out", default=os.path.join(_ZOO, "runs"),
                  help="output root; ALWAYS keep runs under runs/ (git-ignored) — "
@@ -410,6 +502,14 @@ def main():
   elif args.terminal_type != "all":
     print(f"[terminal-type] ignored: {algo} is an avoid learner (no target "
           f"set), so --terminal-type {args.terminal_type} has no effect.")
+  # Action penalties on the PPO loss (safety_sb3 action_rate_coef /
+  # action_mag_coef). Passed only when set, so a safety_sb3 that predates them
+  # still trains every run that leaves them off.
+  if args.action_rate_coef or args.action_mag_coef:
+    akw.update(action_rate_coef=args.action_rate_coef,
+               action_mag_coef=args.action_mag_coef)
+    print(f"[action-penalty] rate={args.action_rate_coef} "
+          f"mag={args.action_mag_coef} (on the deterministic action)")
   if args.adversary:  # full two-player game, tensor path
     akw.update(dict(ctrl_action_dim=s.ctrl_dim,
                dstb_learning_rate=3e-4, dstb_ent_coef=2e-3,  # reference values
@@ -464,6 +564,10 @@ def main():
       start=args.fwd_force, hold_steps=int(0.13 * args.steps),
       anneal_steps=int(0.54 * args.steps)))
     cbs.append(GaitThreshRampCallback())  # trot-threshold curriculum
+
+  if args.critic_warmup_steps > 0:
+    # Ordered BEFORE the run so the freeze is in place from the first rollout.
+    cbs.append(CriticWarmupCallback(args.critic_warmup_steps))
 
   if args.target_kl is not None:
     model.target_kl = args.target_kl
@@ -574,14 +678,69 @@ def main():
         f"vecnormalize.pkl) beside the checkpoint.")
     cbs.append(NormFreezeCallback(args.norm_freeze_steps))
 
+  def _joint_authority_curriculum(tag):
+    # A joint-partition disturbance -- a learned adversary, or the scripted
+    # random arms of a joint_noise task -- is bounded by its joint authority
+    # dstb_gain (for joint_noise: the random motion's MAGNITUDE). Same two
+    # levers for both, since the bridge applies both through one code path.
+    gmax = args.dstb_gain if args.dstb_gain is not None else float(
+      s.kwargs.get("dstb_gain", 1.0))
+    cbs.append(DstbGainRampCallback(gmax,
+                                    int(args.force_ramp_frac * args.steps),
+                                    gain_start=args.dstb_gain_init))
+    lo, hi = s.kwargs["dstb_joint_slice"]
+    print(f"[{tag}] joint-partition: dims {lo}..{hi - 1} of "
+          f"{s.ctrl_dim}; authority ramp {args.dstb_gain_init}->{gmax} over "
+          f"{args.force_ramp_frac:.0%}")
+    if args.dstb_per_env_scale:
+      # The anti-collapse lever the wrench game gets from force_scale: the
+      # disturbance weakens in envs where the robot keeps failing, so the actor
+      # keeps seeing survivable episodes once the global ramp saturates.
+      cbs.append(PerEnvForceScaleCallback(lo=args.dstb_scale_floor,
+                                          init=args.dstb_scale_init,
+                                          name="dstb_scale"))
+      print(f"[{tag}] per-env authority scale: floor="
+            f"{args.dstb_scale_floor} init={args.dstb_scale_init} "
+            f"(effective authority = ramp x per-env scale)")
+    else:
+      print(f"[{tag}] per-env authority scale: OFF (global ramp only)")
+
   if args.adversary:
-    cbs.append(ForceRampCallback(args.force_max,
-                                 int(args.force_ramp_frac * args.steps)))
-    cbs.append(PerEnvForceScaleCallback(lo=args.force_floor,
-                                        init=args.force_init))
-    print(f"[adversary] force ramp 8->{args.force_max}N over "
-          f"{args.force_ramp_frac:.0%}; per-env scale floor={args.force_floor} "
-          f"init={args.force_init}")
+    # The adversary's CHANNEL decides which curriculum it gets. A "wrench"
+    # adversary is bounded by a force in newtons; a "joint" one owns a slice of
+    # the robot's own actuators and is bounded by its joint authority instead --
+    # force_max and the per-env force scale are never read in that mode, so
+    # attaching their callbacks would only print a curriculum that does nothing.
+    if s.kwargs.get("dstb_mode") == "joint":
+      _joint_authority_curriculum("adversary")
+    else:
+      cbs.append(ForceRampCallback(args.force_max,
+                                   int(args.force_ramp_frac * args.steps)))
+      cbs.append(PerEnvForceScaleCallback(lo=args.force_floor,
+                                          init=args.force_init))
+      print(f"[adversary] force ramp 8->{args.force_max}N over "
+            f"{args.force_ramp_frac:.0%}; per-env scale floor={args.force_floor} "
+            f"init={args.force_init}")
+    # Opens the per-player margin channel: the env learns which player is
+    # collecting, so a task can penalize the DISTURBANCE for something the
+    # control player must not be paid for (g1_arm_adversary's self-collision).
+    # A no-op for every task whose margin_fn ignores _zoo_dstb_phase.
+    cbs.append(DstbPhaseCallback())
+  if s.kwargs.get("joint_noise") is not None:
+    # The joint slice is driven by the bridge's random process (e.g.
+    # g1_stabilize_arm_random): its magnitude gets the joint adversary's
+    # curriculum, ramping from --dstb-gain-init up to the task's registered
+    # dstb_gain (or --dstb-gain). Not an elif: a WRENCH adversary may play on
+    # top (g1_recover_arm_random_wrench), and then both curricula run -- the
+    # force on force_max/force_scale, the arms on dstb_gain/dstb_scale.
+    _joint_authority_curriculum("random-joints")
+  for _name in env.mj.command_manager.active_terms:
+    if getattr(env.mj.command_manager.get_term(_name), "ramped", False):
+      cbs.append(TargetScaleRampCallback(
+        _name, int(args.target_ramp_frac * args.steps),
+        scale_start=args.target_scale_init))
+      print(f"[curriculum] goal '{_name}': range {args.target_scale_init:g}->1 "
+            f"of full over {args.target_ramp_frac:.0%}")
 
   if not args.no_wandb:
     import wandb
@@ -589,15 +748,22 @@ def main():
     wandb.init(project=args.wandb_project, name=tag, config=vars(args),
                sync_tensorboard=True, save_code=False, reinit=True)
     cbs.append(WandbCallback(verbose=0))
-    # Use a "<task>_video" packed-terrain herd variant for the eval clip if one
-    # is registered (crawl spreads envs ~24 m -> a herd needs packed patches).
-    _vtask = args.task + "_video"
-    _vtask = _vtask if _vtask in list_tasks() else args.task
-    cbs.append(VideoWandbCallback(
-      lambda: make_tensor(_vtask, 8, args.device, adversary=False,
-                          render_mode="rgb_array",  # native herd, one scene
-                          end_criterion=args.end_criterion),
-      interval=args.video_interval))
+  # Eval clips: an mp4 per interval into <outdir>/videos/, written whether or not
+  # wandb is in use -- only the UPLOAD is conditional (--no-video-wandb, or
+  # --no-wandb). Previously this callback lived inside the wandb block, so
+  # --no-wandb silently meant "no footage at all".
+  # A "<task>_video" packed-terrain herd variant is used if registered (crawl
+  # spreads envs ~24 m -> a herd needs packed patches).
+  _vtask = args.task + "_video"
+  _vtask = _vtask if _vtask in list_tasks() else args.task
+  cbs.append(VideoWandbCallback(
+    lambda: make_tensor(_vtask, 8, args.device, adversary=False,
+                        render_mode="rgb_array",  # native herd, one scene
+                        end_criterion=args.end_criterion),
+    interval=args.video_interval, video_seconds=args.video_seconds,
+    fps=args.video_fps, outdir=outdir,
+    to_wandb=args.video_wandb and not args.no_wandb,
+    herd=None if args.video_herd < 0 else args.video_herd))
 
   model.learn(total_timesteps=args.steps, callback=CallbackList(cbs))
   model.save(os.path.join(outdir, "final_model.zip"))

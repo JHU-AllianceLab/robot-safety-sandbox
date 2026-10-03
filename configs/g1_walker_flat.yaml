@@ -1,0 +1,34 @@
+# G1 blind flat-terrain velocity walker (mode: cumulative) — the TASK policy
+# pi_task that the G1 safety filter wraps, and the thing to train FIRST if what
+# you want is a humanoid that walks: this is the only G1 recipe with a dense
+# gait reward (tracking + posture + foot-gait terms). The reach-avoid twins
+# reward the safety margin g alone. Stock stable_baselines3 PPO, so the
+# checkpoint stays a vanilla SB3 zip (what examples/eval.py --nominal loads).
+#   python examples/train.py --config configs/g1_walker_flat.yaml
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_walker_flat     # mode="cumulative" -> the trainer's plain-RL branch
+num_envs: 4096           # ~2.0 GiB of sim state; ~100k env-steps/s on an RTX 5080
+# A humanoid gait is expensive: mjlab's own rsl_rl G1 recipe runs 30k iterations
+# x 24 steps x 4096 envs ~= 3e9 env-steps. This is a starting budget, and the
+# first knob to raise if the gait is still shuffling.
+steps: 500000000
+seed: 0
+
+# --- plain-RL recipe (the trainer's own defaults are the SAFETY recipe; a
+# cumulative task falls back to these, and this file just pins them) ---
+lr: 3.0e-4
+ent_coef: 5.0e-3
+net: "512,256,128"
+video_interval: 10000000
+
+# NB the SAFETY knobs (adversary, terminal_type, end_criterion, l_anneal_steps,
+# adaptive_lr, the force curricula, ...) are REFUSED for a cumulative task
+# rather than silently applied — they have no meaning without margins.
+
+# --- video: 720p, 20 s of real-time motion, written to <run>/videos/ only ---
+# The mp4 is always saved in the run folder; video_wandb: false keeps it OFF
+# wandb (a 720p/20 s clip is ~5-8 MB vs ~0.3 MB for the old 320x240/10 s one,
+# which would take a long run's media from ~7 MB to ~300 MB).
+video_seconds: 20        # seconds of ROBOT MOTION (resolved via the 50 Hz control dt)
+video_fps: 50            # = 1/control-dt -> real-time playback, not 0.6x slow motion
+video_wandb: false       # scalars still go to wandb; only the clip stays local
