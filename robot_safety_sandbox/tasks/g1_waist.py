@@ -4,7 +4,7 @@ Two single-player tasks, one per phase of the switched controller
 (``filters/switch.py``); the margins and the reasoning are in
 ``envs/g1_waist/env_cfg.py``.
 
-``g1_waist_stay_arm_random``   AVOID on h = min(g, soft_floor(l_box)): stay
+``g1_waist_stay_arm_random``   AVOID on h = min(g, soft_tail(l_box)): stay
                                upright AND inside the goal set, a fall ranked
                                below any box violation. Trained first.
 ``g1_waist_reach_arm_random``  REACH-AVOID with g and l = min(l_box, V_stay),

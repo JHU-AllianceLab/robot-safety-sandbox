@@ -232,16 +232,17 @@ def test_bridge_refuses_a_joint_slice_nothing_owns():
 def test_random_arm_tasks_register_single_player_on_g1_stabilize_margins():
   import robot_safety_sandbox  # noqa: F401  (registers on import)
   from robot_safety_sandbox.envs.g1_stabilize.env_cfg import (
-    g1_locomote_env_cfg, g1_stabilize_env_cfg, locomote_margins,
-    stance_margins)
+    g_fall, g1_locomote_env_cfg, g1_stabilize_env_cfg, l_stance, l_track)
   from robot_safety_sandbox.registry import algo_name, spec
-  for tid, cfg, margins, twin in (
-      ("g1_stabilize_arm_random", g1_stabilize_env_cfg, stance_margins,
+  for tid, cfg, reach, twin in (
+      ("g1_stabilize_arm_random", g1_stabilize_env_cfg, l_stance,
        "g1_stabilize_arm_adv"),
-      ("g1_locomote_arm_random", g1_locomote_env_cfg, locomote_margins,
+      ("g1_locomote_arm_random", g1_locomote_env_cfg, l_track,
        "g1_locomote_arm_adv")):
     s, adv = spec(tid), spec(twin)
-    assert s.cfg_builder is cfg and s.margin_fn is margins
+    # g1_stabilize's margins: avoid g_fall, reach l_stance / l_track
+    assert s.cfg_builder is cfg
+    assert s.margin_fn.avoid_margin is g_fall and s.margin_fn.reach_margin is reach
     assert algo_name(tid) == "ReachAvoidPPO1P"
     assert not s.supports_adversary
     with pytest.raises(ValueError, match="does not define an adversary"):

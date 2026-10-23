@@ -1,0 +1,270 @@
+# The LAFAN-recovery sweep: E3 (start-state sampling), E4 (push placement) and
+# E5 (objective) of docs/experiments/g1-lafan-recovery.md, as per-arm
+# overrides of ONE reference config.
+#
+#   python examples/make_sweep.py                 # -> configs/sweeps/lafan_recovery/
+#   python examples/make_sweep.py --smoke         # -> configs/sweeps/lafan_recovery_smoke/
+#   examples/run_jobs.sh configs/sweeps/lafan_recovery/prep_jobs.txt
+#   examples/run_jobs.sh configs/sweeps/lafan_recovery/jobs.txt
+#
+# make_sweep.py resolves every arm as `base` + the arm's `config` (top-level
+# keys replace; `env_overrides` and `random_push` merge PER KEY, each value
+# replacing the base's whole -- so an arm's `weights` is the complete mixture,
+# not a patch on the base's), checks every key against the trainer's argparse
+# dests, and writes one train_on_policy config per arm plus the job lists.
+# Arms that resolve to the same config train ONCE (S3 = P-env = O0 = the
+# reference): the later ones reference the first one's run directory.
+#
+# EDIT THIS FILE, not the generated configs (they are overwritten).
+
+name: lafan_recovery
+runs_root: runs/lafan_recovery
+config_dir: configs/sweeps/lafan_recovery
+seeds: [0, 1]
+
+# --- the reference configuration (S3 = P-env = O0) ------------------------------
+# push_fast's recipe (fixed gamma 0.99, privileged critic, 3 s cap, rest
+# truncation gated on the push) on g1_recover_lafan (exactly ONE push per
+# episode, 0.1-0.4 s after the spawn, uniform horizontal direction), warm-
+# started from push_fast_privcrit with a 20M-step critic warmup; starts are 30 %
+# the walker-bank mixture + 70 % LAFAN train frames weighted p(1 - p) by their
+# rollout labels.
+base:
+  family: on_policy
+  task: g1_recover_lafan
+  num_envs: 4096
+  steps: 500000000
+  load: runs/g1_recover_push_fast_privcrit/g1_recover_push_fast/final_model.zip
+  critic_warmup_steps: 20000000
+  gamma: 0.99
+  gamma_anneal: false
+  privileged_critic: true
+  lr: 1.0e-4
+  adaptive_lr: false
+  target_kl: 0.01
+  ent_coef: 1.0e-3
+  max_std: 0.4
+  net: "512,256,128"
+  action_rate_coef: 0.05
+  action_mag_coef: 0.005
+  # The push ceiling, set from E1 (2026-10-23, runs/lafan_recovery/E1_calibration):
+  # 300 N = 60 N s at 0.2 s, past push_fast_privcrit's standing F50 (48 N s)
+  # toward its F10, so it does not bind while the policy improves. E1's own
+  # rule (1.3 x the E-lafan F10) has nothing to read: about half the held-out
+  # LAFAN starts fall with NO push, so E-lafan never crosses 10 % on the grid
+  # and its 390 N suggestion is a grid-edge fallback. force_start follows it
+  # (no ramp); the per-env survival scale finds each env's frontier below it.
+  force_max: &force_max 300.0
+  force_start: *force_max
+  force_ramp_frac: 0.5
+  force_init: 0.5
+  force_floor: 0.2
+  video_interval: 100000000
+  video_seconds: 20
+  video_fps: 50
+  video_wandb: false
+  env_overrides:
+    dataset: [data/g1_recover_states.pt, data/g1_recover_states_lafan1_train_labeled.pt]
+    # 30 % the push_rear walker mixture (x 0.3) + 70 % LAFAN frames
+    weights: {nominal: 0.03, clean: 0.06, pushed: 0.075, fell: 0.09,
+              synthetic: 0.045, mocap: 0.70, handover: 0.0}
+    levels: 5
+    band_width: 0.4
+    init_level: 2
+    episode_length_s: 3.0
+    rest_terminate: true
+    rest_dwell_s: 0.4
+    rest_arm_s: 0.8
+    rest_gate_on_push: true    # the rest dwell counts only once the push is over
+    sampler: weighted          # S3: fixed p(1 - p) of the rollout label
+    uniform_mix: 0.15
+    weight_column: p_surv
+
+# --- smoke variant (make_sweep.py --smoke) ----------------------------------------
+# Same arms, a 2M-step run on 1024 envs, no checkpoints or videos inside the
+# run, no wandb, outputs under runs/smoke/. It checks that every arm BUILDS and
+# trains a few rollouts (configs, data, warm start, samplers, push overrides),
+# not that it learns anything.
+smoke:
+  runs_root: runs/smoke/lafan_recovery
+  config_dir: configs/sweeps/lafan_recovery_smoke
+  seeds: [0]
+  config:
+    steps: 2000000
+    num_envs: 1024
+    critic_warmup_steps: 0
+    checkpoint_every: 100000000
+    video_interval: 100000000
+  train_flags: [--no-wandb]
+  eval_flags: [--quick]
+
+# --- evaluation --------------------------------------------------------------------
+# eval_jobs.txt runs the frozen suite on every trained run (one job per run, all
+# from the same seed and cells) and on these baselines; report_jobs.txt merges
+# each experiment's evals into one comparison (per-arm means and seed gaps).
+eval:
+  grid_file: configs/sweeps/lafan_recovery/eval_grid.yaml
+  # std / lafan / handover are the suite proper; walker (E3's forgetting check)
+  # and pre (E4's E-pre: held-out collected handovers, no further push) are
+  # the opt-in read-outs
+  settings: [std, lafan, handover, walker, pre]
+  # extra passes over some experiments' runs, each with its own eval dirs
+  # (<run>/eval_<pass>) and reports (<exp>/report_<pass>)
+  passes:
+    # E5's staying check: E-handover with a 6 s window, i.e. a 3 s reach budget
+    # (--reach-s) and at least 3 s more after a reach within it
+    stay:
+      experiments: [E5]
+      flags: [--setting, handover, --eval-s, "6.0", --reach-s, "3.0"]
+  baselines:
+    push_fast_privcrit: runs/g1_recover_push_fast_privcrit/g1_recover_push_fast/final_model.zip
+    push_rear: runs/g1_recover_push_rear/g1_recover_push_rear/final_model.zip
+
+# --- prerequisites (prep_jobs.txt, in this order) ---------------------------------
+# ${force_max} is base.force_max (labels and harvests use the training push);
+# ${load} is base.load (the warm start doubles as the labeling policy); any
+# other ${name} comes from prep_vars. Each step's `creates` lets run_jobs.sh
+# skip it once its outputs exist.
+prep_vars:
+  # The P-pre-nominal pushes, N s (uniform): the frozen eval grid's range (to
+  # 60 N s = the 300 N ceiling x 0.2 s), so the harvested handovers reach and
+  # pass the frontier. The replay before the handover is <= 0.3 s (the
+  # harvester's --onset-s 0.02 0.1 and --handover-s 0 0.2 defaults).
+  handover_impulse_range: "4 60"
+prep:
+  - name: library
+    note: every 50 fps frame of every LAFAN1 clip, contiguous per clip (E-handover replays)
+    cmd: python examples/build_g1_recover_mocap_states.py --library --out data/g1_lafan1_clips.pt
+    creates: [data/g1_lafan1_clips.pt]
+  - name: split
+    note: E0.2, ~15 % of the clips of each category held out, for the stride bank and the library
+    cmd: python examples/split_lafan_clips.py
+    creates: [data/lafan1_split.json, data/g1_recover_states_lafan1_train.pt,
+              data/g1_recover_states_lafan1_test.pt, data/g1_lafan1_clips_train.pt,
+              data/g1_lafan1_clips_test.pt]
+  - name: E1
+    note: push-range calibration on the held-out split; writes the frozen grid (set base.force_max from it)
+    cmd: >-
+      python examples/eval_push_suite.py --calibrate
+      --policy push_fast_privcrit=runs/g1_recover_push_fast_privcrit/g1_recover_push_fast/final_model.zip
+      --policy push_rear=runs/g1_recover_push_rear/g1_recover_push_rear/final_model.zip
+      --policy push_fast_cont=runs/g1_recover_push_fast_cont/g1_recover_push_fast/final_model.zip
+      --out runs/lafan_recovery/E1_calibration
+    creates: [runs/lafan_recovery/E1_calibration/summary.json,
+              configs/sweeps/lafan_recovery/eval_grid.yaml]
+  - name: label_lafan
+    note: E0.4 + E2, K = 8 rollouts per LAFAN train row; its .report.json is the E2 read-out (AUC of V)
+    cmd: >-
+      python examples/label_start_states.py --policy ${load}
+      --bank data/g1_recover_states_lafan1_train.pt
+      --out data/g1_recover_states_lafan1_train_labeled.pt --k 8 --force-max ${force_max}
+    creates: [data/g1_recover_states_lafan1_train_labeled.pt]
+  - name: harvest_self_handover
+    note: P-pre-self starts, the warm-start policy's own states 0-20 steps after a push on LAFAN train frames
+    cmd: >-
+      python examples/harvest_g1_frontier_states.py --policy ${load}
+      --task g1_recover_lafan --dataset data/g1_recover_states_lafan1_train.pt
+      --weights '{"mocap": 1, "nominal": 0, "clean": 0, "pushed": 0, "fell": 0, "synthetic": 0, "handover": 0}'
+      --sampler uniform --kind handover --force-max ${force_max} --delays 0 5 10 20
+      --samples 100000 --out data/g1_self_handover_train.pt
+    creates: [data/g1_self_handover_train.pt]
+  - name: label_self_handover
+    cmd: >-
+      python examples/label_start_states.py --policy ${load}
+      --bank data/g1_self_handover_train.pt
+      --out data/g1_self_handover_train_labeled.pt --k 8 --force-max ${force_max}
+    creates: [data/g1_self_handover_train_labeled.pt]
+  - name: harvest_handover
+    note: E0.5, P-pre-nominal starts, a train clip replayed + pushed, captured at the handover with the pending push
+    cmd: >-
+      python examples/harvest_g1_handover_states.py --library data/g1_lafan1_clips_train.pt
+      --policy ${load} --impulse-range ${handover_impulse_range} --samples 100000
+      --out data/g1_handover_train.pt
+    creates: [data/g1_handover_train.pt]
+  - name: label_handover
+    cmd: >-
+      python examples/label_start_states.py --policy ${load}
+      --bank data/g1_handover_train.pt
+      --out data/g1_handover_train_labeled.pt --k 8 --force-max ${force_max}
+    creates: [data/g1_handover_train_labeled.pt]
+  - name: harvest_handover_test
+    note: E-pre's held-out bank, the same handover harvest on the TEST clips (evaluation only)
+    cmd: >-
+      python examples/harvest_g1_handover_states.py --library data/g1_lafan1_clips_test.pt
+      --impulse-range ${handover_impulse_range} --no-label --samples 20000
+      --out data/g1_handover_test.pt
+    creates: [data/g1_handover_test.pt]
+
+# --- experiments ---------------------------------------------------------------------
+# Each arm: `config` (the override of `base`; empty = the reference), optional
+# `note`, optional `gate` (a condition from an earlier read-out: the arm's jobs
+# go to jobs_gated.txt instead of jobs.txt).
+experiments:
+  E3:
+    title: start-state sampling (12 runs)
+    arms:
+      S0:
+        note: walker bank only (the push_rear mixture), no LAFAN frames
+        config:
+          env_overrides:
+            dataset: data/g1_recover_states.pt
+            weights: {nominal: 0.10, clean: 0.20, pushed: 0.25, fell: 0.30,
+                      synthetic: 0.15, mocap: 0.0, handover: 0.0}
+      S1:
+        note: + LAFAN, rows uniform
+        config: {env_overrides: {sampler: uniform}}
+      S2:
+        note: + LAFAN, the level ladder sorted by speed
+        config: {env_overrides: {sampler: ladder}}
+      S3:
+        note: + LAFAN, fixed p(1 - p) of the rollout label (the reference)
+        config: {}
+      S4:
+        note: + LAFAN, online per-row EMA of training outcomes, initialised from the labels
+        config: {env_overrides: {sampler: online}}
+      S5:
+        note: + LAFAN, p(1 - p) of the value-calibrated label
+        gate: "E2: episode AUC of V >= 0.9 (data/g1_recover_states_lafan1_train_labeled.report.json)"
+        config: {env_overrides: {weight_column: p_value}}
+  E4:
+    title: push placement (8 runs)
+    arms:
+      P-env:
+        note: LAFAN frames, the push lands inside the episode (the reference)
+        config: {}
+      P-pre-self:
+        note: the warm-start policy's own post-push states, no push in the episode
+        config:
+          env_overrides:
+            dataset: [data/g1_recover_states.pt, data/g1_self_handover_train_labeled.pt]
+            weights: {nominal: 0.03, clean: 0.06, pushed: 0.075, fell: 0.09,
+                      synthetic: 0.045, mocap: 0.0, handover: 0.70}
+          random_push: {max_pushes: 0}
+      P-pre-nominal:
+        note: replayed clip + push, handover 0-0.2 s after the onset, the pending push carried; no other push
+        config:
+          env_overrides:
+            dataset: [data/g1_recover_states.pt, data/g1_handover_train_labeled.pt]
+            weights: {nominal: 0.03, clean: 0.06, pushed: 0.075, fell: 0.09,
+                      synthetic: 0.045, mocap: 0.0, handover: 0.70}
+          random_push: {max_pushes: 0}
+      P-mix:
+        note: half P-pre-nominal handovers (they consume their push), half P-env LAFAN frames
+        config:
+          env_overrides:
+            dataset: [data/g1_recover_states.pt, data/g1_recover_states_lafan1_train_labeled.pt,
+                      data/g1_handover_train_labeled.pt]
+            weights: {nominal: 0.03, clean: 0.06, pushed: 0.075, fell: 0.09,
+                      synthetic: 0.045, mocap: 0.35, handover: 0.35}
+  E5:
+    title: objective (6 runs; O3 needs a handback controller with a safety critic)
+    arms:
+      O0:
+        note: avoid (the reference)
+        config: {}
+      O1:
+        note: reach-avoid to l_stance, tight (0.25 m/s, 0.30 rad/s), the task bakes the matching rest target
+        config: {task: g1_recover_lafan_ra, reset_value: true}
+      O2:
+        note: reach-avoid to l_stance, loose (0.5 m/s, 0.6 rad/s)
+        config: {task: g1_recover_lafan_ra_loose, reset_value: true}

@@ -132,6 +132,18 @@ class TaskSpec:
       raise ValueError(
         f"task '{self.task_id}' is mode={self.mode!r} and needs a margin_fn "
         f"(only mode={CUMULATIVE!r} trains without margins, on dense reward)")
+    # An AVOID-ONLY task declares ONLY an avoid margin: margins.compose(g) or
+    # margins.avoid_only(...) (both tag has_target=False). A margin_fn that
+    # carries a reach margin -- or an untagged one, which the registry reads as
+    # carrying one -- would have its l silently ignored by the avoid learner.
+    # (The converse, an avoid-only margin under mode=REACH_AVOID, is refused in
+    # algo_name.)
+    if (self.mode == AVOID
+        and getattr(self.margin_fn, "has_target", True) is not False):
+      raise ValueError(
+        f"task '{self.task_id}' is mode={AVOID!r} (avoid only) but its margin_fn "
+        f"declares a reach margin (or is untagged). Declare the avoid margin "
+        f"alone: margin_fn=margins.compose(g_fn).")
     if self.end_criterion not in END_CRITERIA:
       raise ValueError(
         f"task '{self.task_id}' has end_criterion={self.end_criterion!r}; "

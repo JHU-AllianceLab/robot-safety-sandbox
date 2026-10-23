@@ -133,7 +133,31 @@ class _ClipRecorder:
       except Exception:
         pass
 
+  def _mirror_push(self):
+    """A random-push clip env is built bare (force_max at the bridge default,
+    no per-env scale), so without this a clip would show weak pushes whatever
+    the curriculum has reached. Copy the training bridge's force_max and its
+    MEAN per-env scale onto the clip env, so the clip shows the push the
+    policy is being trained against right now."""
+    clip = self._env
+    if getattr(clip, "_push", None) is None:
+      return
+    train = getattr(self, "model", None)
+    train = getattr(train, "env", None)
+    while hasattr(train, "venv"):
+      train = train.venv
+    fmax = getattr(train, "force_max", None)
+    if fmax is None:
+      return
+    clip.force_max = float(fmax)
+    scale = getattr(train, "force_scale", None)
+    if scale is not None:
+      import torch as th
+      clip.force_scale = th.full((int(clip.num_envs),), float(scale.mean()),
+                                 device=clip.device)
+
   def _emit_clip(self):
+    self._mirror_push()
     path = _record_clip(self._env, self._predict_step, self.video_len,
                         self.fps, _clip_path(self._outdir, self.num_timesteps),
                         self._bound)

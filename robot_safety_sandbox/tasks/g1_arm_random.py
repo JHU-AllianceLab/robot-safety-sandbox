@@ -46,7 +46,7 @@ margin scalars as the reach-avoid twin, for a like-for-like comparison.
 
 from __future__ import annotations
 
-from ..margins import avoid_only
+from ..margins import compose
 from ..registry import AVOID, CUMULATIVE, REACH_AVOID, TaskSpec, register
 
 #: The arm joints in action order, per side (dims 15..21 left, 22..28 right;
@@ -96,31 +96,35 @@ def register_all() -> None:
     g1_arm_random_dense_env_cfg,
   )
   from robot_safety_sandbox.envs.g1_stabilize.env_cfg import (
+    g_fall,
     g1_locomote_env_cfg,
     g1_stabilize_env_cfg,
-    locomote_margins,
-    stance_margins,
+    l_stance,
+    l_track,
   )
   register(TaskSpec(
     task_id="g1_stabilize_arm_random", cfg_builder=g1_stabilize_env_cfg,
-    margin_fn=stance_margins, mode=REACH_AVOID,
+    # REACH-AVOID.  avoid margin: g_fall    reach margin: l_stance
+    margin_fn=compose(g_fall, l_stance), mode=REACH_AVOID,
     ctrl_dim=G1_CTRL_DIM, dstb_dim=G1_ARM_DIM, supports_adversary=False,
     kwargs=dict(G1_ARM_RANDOM_BRIDGE_KWARGS),
     description="Flat ground, zero command: hold a stable stand while the arms "
                 "swing smoothly at random, magnitude ramped by a curriculum."))
-  # Avoid-only twin: same g, the stance target stripped (avoid_only), so the
-  # backup is V = min(g, gamma V') and nothing asks the robot to stop moving --
-  # only not to fall. Same obs and head, so it warm-starts from either twin.
+  # Avoid-only twin: the same avoid margin and NO reach margin, so the backup is
+  # V = min(g, gamma V') and nothing asks the robot to stop moving -- only not
+  # to fall. Same obs and head, so it warm-starts from either twin.
   register(TaskSpec(
     task_id="g1_stabilize_arm_random_avoid", cfg_builder=g1_stabilize_env_cfg,
-    margin_fn=avoid_only(stance_margins), mode=AVOID,
+    # AVOID ONLY.   avoid margin: g_fall    reach margin: none
+    margin_fn=compose(g_fall), mode=AVOID,
     ctrl_dim=G1_CTRL_DIM, dstb_dim=G1_ARM_DIM, supports_adversary=False,
     kwargs=dict(G1_ARM_RANDOM_BRIDGE_KWARGS),
     description="g1_stabilize_arm_random avoid-only: don't fall while the arms "
                 "swing at random; no stance (reach) target."))
   register(TaskSpec(
     task_id="g1_locomote_arm_random", cfg_builder=g1_locomote_env_cfg,
-    margin_fn=locomote_margins, mode=REACH_AVOID,
+    # REACH-AVOID.  avoid margin: g_fall    reach margin: l_track
+    margin_fn=compose(g_fall, l_track), mode=REACH_AVOID,
     ctrl_dim=G1_CTRL_DIM, dstb_dim=G1_ARM_DIM, supports_adversary=False,
     kwargs=dict(G1_ARM_RANDOM_BRIDGE_KWARGS),
     description="Flat ground, constant forward command: keep walking while the "
@@ -128,7 +132,9 @@ def register_all() -> None:
   register(TaskSpec(
     task_id="g1_stabilize_arm_random_cumulative",
     cfg_builder=g1_arm_random_dense_env_cfg,
-    margin_fn=stance_margins, mode=CUMULATIVE,
+    # CUMULATIVE (trains on the dense reward); the margins are computed
+    # alongside for a train-time filter / the failure counters only.
+    margin_fn=compose(g_fall, l_stance), mode=CUMULATIVE,
     ctrl_dim=G1_CTRL_DIM, dstb_dim=G1_ARM_DIM, supports_adversary=False,
     kwargs=dict(G1_ARM_RANDOM_BRIDGE_KWARGS, dense_margins=True),
     description="g1_stabilize_arm_random on the dense reward (cumulative "

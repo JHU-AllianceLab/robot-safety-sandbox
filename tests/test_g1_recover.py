@@ -124,7 +124,10 @@ def test_curriculum_promotes_on_timeout_and_demotes_on_fall():
   assert int(st.level[0, SRC_PUSHED]) == 2           # other sources untouched
   assert log["surv_clean"] == 1.0 and log["surv_fell"] == 0.0
   assert log["surv_pushed"] == 0.0 and log["surv_nominal"] == 1.0
-  assert {f"lvl_{s}" for s in SOURCES[1:]} <= set(log)
+  # the four walker / synthetic sources always; mocap / handover only when the
+  # spawn draws them by the ladder with a weight > 0 (none here)
+  assert {f"lvl_{s}" for s in SOURCES[1:5]} <= set(log)
+  assert "lvl_mocap" not in log and "lvl_handover" not in log
   # SB3 truncates console keys past 36 chars ("   " + key); none may collide
   assert all(3 + len(f"Curriculum/recover/{k}") <= 36 for k in log)
 
@@ -297,6 +300,23 @@ def test_recover_wrench_task_is_the_random_arm_task_plus_a_torso_wrench():
             "action_bound"):
     assert w.kwargs[k] == arm.kwargs[k], k
   # the learned player is g1_stabilize's wrench
+  assert w.dstb_dim == 3 and w.kwargs["dstb_mode"] == "wrench"
+  assert w.kwargs["adversary_body"] == spec("g1_stabilize").kwargs["adversary_body"]
+
+
+def test_recover_wrench_task_is_g1_recover_plus_a_torso_wrench():
+  import robot_safety_sandbox  # noqa: F401
+  from robot_safety_sandbox.registry import AVOID, algo_name, spec
+  full, w = spec("g1_recover"), spec("g1_recover_wrench")
+  assert w.mode == AVOID and w.supports_adversary
+  assert algo_name(w.task_id) == "SafetyPPO1P"
+  assert algo_name(w.task_id, adversary=True) == "SafetyPPO2P"
+  # same env, margins and head -> a g1_recover checkpoint warm-starts whole
+  assert w.cfg_builder is full.cfg_builder and w.ctrl_dim == full.ctrl_dim
+  assert getattr(w.margin_fn, "has_target", True) is False
+  for k in ("ctrl_gain", "action_bound"):
+    assert w.kwargs[k] == full.kwargs[k], k
+  assert "joint_noise" not in w.kwargs and "dstb_joint_slice" not in w.kwargs
   assert w.dstb_dim == 3 and w.kwargs["dstb_mode"] == "wrench"
   assert w.kwargs["adversary_body"] == spec("g1_stabilize").kwargs["adversary_body"]
 

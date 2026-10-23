@@ -1,0 +1,246 @@
+{
+ "sweep": "configs/sweeps/lafan_recovery.yaml",
+ "smoke": true,
+ "only": null,
+ "runs_root": "runs/smoke/lafan_recovery",
+ "seeds": [
+  0
+ ],
+ "arms": [
+  {
+   "exp": "E3",
+   "arm": "S0",
+   "note": "walker bank only (the push_rear mixture), no LAFAN frames",
+   "gate": null,
+   "canonical": "E3/S0",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_smoke/E3_S0.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery/E3/S0_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery/E3/S0_s0/g1_recover_lafan/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery/E3/S0_s0/eval_frozen"
+   }
+  },
+  {
+   "exp": "E3",
+   "arm": "S1",
+   "note": "+ LAFAN, rows uniform",
+   "gate": null,
+   "canonical": "E3/S1",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_smoke/E3_S1.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery/E3/S1_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery/E3/S1_s0/g1_recover_lafan/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery/E3/S1_s0/eval_frozen"
+   }
+  },
+  {
+   "exp": "E3",
+   "arm": "S2",
+   "note": "+ LAFAN, the level ladder sorted by speed",
+   "gate": null,
+   "canonical": "E3/S2",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_smoke/E3_S2.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery/E3/S2_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery/E3/S2_s0/g1_recover_lafan/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery/E3/S2_s0/eval_frozen"
+   }
+  },
+  {
+   "exp": "E3",
+   "arm": "S3",
+   "note": "+ LAFAN, fixed p(1 - p) of the rollout label (the reference)",
+   "gate": null,
+   "canonical": "E3/S3",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_smoke/E3_S3.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery/E3/S3_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery/E3/S3_s0/g1_recover_lafan/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery/E3/S3_s0/eval_frozen"
+   }
+  },
+  {
+   "exp": "E3",
+   "arm": "S4",
+   "note": "+ LAFAN, online per-row EMA of training outcomes, initialised from the labels",
+   "gate": null,
+   "canonical": "E3/S4",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_smoke/E3_S4.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery/E3/S4_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery/E3/S4_s0/g1_recover_lafan/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery/E3/S4_s0/eval_frozen"
+   }
+  },
+  {
+   "exp": "E3",
+   "arm": "S5",
+   "note": "+ LAFAN, p(1 - p) of the value-calibrated label",
+   "gate": "E2: episode AUC of V >= 0.9 (data/g1_recover_states_lafan1_train_labeled.report.json)",
+   "canonical": "E3/S5",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_smoke/E3_S5.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery/E3/S5_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery/E3/S5_s0/g1_recover_lafan/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery/E3/S5_s0/eval_frozen"
+   }
+  },
+  {
+   "exp": "E4",
+   "arm": "P-env",
+   "note": "LAFAN frames, the push lands inside the episode (the reference)",
+   "gate": null,
+   "canonical": "E3/S3",
+   "same_as": "E3/S3",
+   "config_path": "configs/sweeps/lafan_recovery_smoke/E3_S3.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery/E3/S3_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery/E3/S3_s0/g1_recover_lafan/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery/E3/S3_s0/eval_frozen"
+   }
+  },
+  {
+   "exp": "E4",
+   "arm": "P-pre-self",
+   "note": "the warm-start policy's own post-push states, no push in the episode",
+   "gate": null,
+   "canonical": "E4/P-pre-self",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_smoke/E4_P-pre-self.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery/E4/P-pre-self_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery/E4/P-pre-self_s0/g1_recover_lafan/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery/E4/P-pre-self_s0/eval_frozen"
+   }
+  },
+  {
+   "exp": "E4",
+   "arm": "P-pre-nominal",
+   "note": "replayed clip + push, handover 0-0.2 s after the onset, the pending push carried; no other push",
+   "gate": null,
+   "canonical": "E4/P-pre-nominal",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_smoke/E4_P-pre-nominal.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery/E4/P-pre-nominal_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery/E4/P-pre-nominal_s0/g1_recover_lafan/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery/E4/P-pre-nominal_s0/eval_frozen"
+   }
+  },
+  {
+   "exp": "E4",
+   "arm": "P-mix",
+   "note": "half P-pre-nominal handovers (they consume their push), half P-env LAFAN frames",
+   "gate": null,
+   "canonical": "E4/P-mix",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_smoke/E4_P-mix.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery/E4/P-mix_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery/E4/P-mix_s0/g1_recover_lafan/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery/E4/P-mix_s0/eval_frozen"
+   }
+  },
+  {
+   "exp": "E5",
+   "arm": "O0",
+   "note": "avoid (the reference)",
+   "gate": null,
+   "canonical": "E3/S3",
+   "same_as": "E3/S3",
+   "config_path": "configs/sweeps/lafan_recovery_smoke/E3_S3.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery/E3/S3_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery/E3/S3_s0/g1_recover_lafan/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery/E3/S3_s0/eval_frozen"
+   }
+  },
+  {
+   "exp": "E5",
+   "arm": "O1",
+   "note": "reach-avoid to l_stance, tight (0.25 m/s, 0.30 rad/s), the task bakes the matching rest target",
+   "gate": null,
+   "canonical": "E5/O1",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_smoke/E5_O1.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery/E5/O1_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery/E5/O1_s0/g1_recover_lafan_ra/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery/E5/O1_s0/eval_frozen"
+   }
+  },
+  {
+   "exp": "E5",
+   "arm": "O2",
+   "note": "reach-avoid to l_stance, loose (0.5 m/s, 0.6 rad/s)",
+   "gate": null,
+   "canonical": "E5/O2",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_smoke/E5_O2.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery/E5/O2_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery/E5/O2_s0/g1_recover_lafan_ra_loose/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery/E5/O2_s0/eval_frozen"
+   }
+  }
+ ],
+ "warnings": []
+}

@@ -1,0 +1,96 @@
+# SafetyPPO1P on g1_recover_push_rear: the push_fast experiment (fixed gamma
+# 0.99, one event per episode, privileged critic) with the push directions
+# REAR-BIASED. M=Safety (avoid-only), A=PPO, P=1P.
+#
+#   python examples/train.py --config configs/g1_recover_push_rear_safetyppo1p.yaml \
+#       --out runs/g1_recover_push_rear
+#
+# WHY. The push_fast_cont policy (1B steps, trains at ~180 N) survives half its
+# pushes at ~120 N from directly behind (driving it forward), ~146 N from
+# back-left, ~232 N from back-right and ~245 N on the chest: at 180 N from
+# standing, 16 % from behind vs 98 % on the chest. Directions were uniform, so
+# the direction-blind per-env force scale settled at the pooled 50 % point,
+# where pushes from behind are mostly lost and teach little.
+#
+# WHAT CHANGES vs configs/g1_recover_push_fast_safetyppo1p.yaml: the task and
+# the push ceiling (200 N, not 300 N). g1_recover_push_rear draws half the
+# pushes from within 60 deg of straight behind (the force along the pelvis
+# heading at the onset) and half uniform, so 2/3 of all pushes land in the rear
+# 120 deg and 1/8 on the chest (random_push.RandomPush rear_frac /
+# rear_half_width_deg). Like runs/g1_recover_push_fast_privcrit it trains from
+# scratch with seed 0, so that run is the baseline (it differs in the push
+# directions AND the ceiling).
+#
+# READING IT. The push is force_scale x 200 N here, so game/force_scale_mean is
+# NOT comparable to the 300 N runs' (x 300 N). It will also settle lower than
+# a uniform-direction run's, because the pooled 50 % point now sits mostly on
+# rear pushes. force_scale_mean near 1 = the 200 N ceiling binds and the
+# per-env scale can no longer find the 50 % point. Compare by side instead:
+# push/surv_from_behind, push/surv_from_front, push/surv_from_left,
+# push/surv_from_right (survival rate of the episodes whose last push came from
+# that side, at the force each env is currently at), and re-run the fixed-force
+# direction eval on the final checkpoint against privcrit's (50 % survival at
+# 227 N from standing, 192 N on the training mix; 0.52 from behind vs 0.96 on
+# the chest at 180 N from standing). Watch that push/surv_from_front does not
+# decay: chest pushes are now 1/8 of the mix.
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_recover_push_rear
+num_envs: 4096
+steps: 500000000
+seed: 0
+
+# From scratch (no load). To warm-start instead, the privileged-critic run is
+# the checkpoint to use: its actor matches push_fast_cont's and its critic and
+# both obs normalizers load whole --
+#   load: runs/g1_recover_push_fast_privcrit/g1_recover_push_fast/final_model.zip
+#   critic_warmup_steps: 5000000
+critic_warmup_steps: 0
+
+# NB the avoid-trained policies survive pushes by RUNNING (median base speed
+# 1.5-1.9 m/s, angular rate ~2.4 rad/s, 0.2 % of steps inside the stance set),
+# so the rest truncation below rarely fires on them and the 3 s cap is what
+# ends a survived episode. It stays on so that a policy that does settle is
+# cut at rest; a fallback that must come to rest is the reach-avoid
+# formulation (stance_margins as the target), not a termination rule.
+
+env_overrides:
+  dataset: null          # null -> data/g1_recover_states.pt or $SAFE_ZOO_G1_RECOVER_DATASET
+  weights: {nominal: 0.10, clean: 0.20, pushed: 0.25, fell: 0.30, synthetic: 0.15}
+  levels: 5
+  band_width: 0.4
+  init_level: 2          # start partway up each source's difficulty ladder
+  episode_length_s: 3.0  # the cap: fell or at rest well before this
+  rest_terminate: true   # end (as a truncation) once back in the stance set ...
+  rest_dwell_s: 0.4      # ... for this long without a break ...
+  rest_arm_s: 0.8        # ... and never before the first push has landed
+
+# --- the push: constant ceiling, per-env survival scale finds the frontier ----
+force_max: 200.0
+force_start: 200.0       # = force_max: no ramp
+force_ramp_frac: 0.5
+force_init: 0.5          # 100 N at step 0
+force_floor: 0.2         # 40 N
+
+# --- one critic, fixed discount --------------------------------------------
+gamma: 0.99
+gamma_anneal: false
+# Asymmetric critic: the value net also sees base_lin_vel, pelvis height and the
+# feet's heights / contacts / forces (the env's "critic" group, 114 dims); the
+# actor keeps its 98.
+privileged_critic: true
+
+# --- safety-PPO recipe (as the push_fast runs) --------------------------------
+lr: 1.0e-4
+adaptive_lr: false
+target_kl: 0.01
+ent_coef: 1.0e-3
+max_std: 0.4
+net: "512,256,128"
+
+action_rate_coef: 0.05
+action_mag_coef: 0.005
+
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

@@ -10,13 +10,18 @@ Boundary experience comes from the ADVERSARY (a worst-case wrench on the torso,
 which replaces the random push the bridge drops), not from a widened spawn
 distribution. See ``PORTING.md`` — this task is the first row of that table.
 
-Tasks:
-  stabilize: zero command; g = don't fall (pelvis height, tilt, non-foot ground
-             contact); l = stance band (pelvis in [0.55, 0.85], nearly upright,
-             |v| and |w| small)
+Tasks (margins below: ``g_fall``, ``l_stance``, ``l_track``):
+  stabilize: zero command; reach-avoid
+             avoid margin g_fall   = don't fall (pelvis height, tilt, non-foot
+                                     ground contact)
+             reach margin l_stance = stance band (pelvis in [0.55, 0.85],
+                                     nearly upright, |v| and |w| small)
              -> V > 0 == "can return to a stable stand despite the adversary"
-  locomote:  constant forward command; same g; l = tracking that command
+  locomote:  constant forward command; reach-avoid
+             avoid margin g_fall, reach margin l_track = tracking that command
              -> V > 0 == "can keep walking at the command despite the adversary"
+  (the g1_recover* tasks reuse this cfg family as AVOID ONLY: g_fall, no reach
+  margin.)
 
 WHY THE MARGINS DIFFER FROM THE GO2's. The quadruped's g is the minimum height
 of the eight trunk corners: a Go2 trunk is a box close to the ground and a fall
@@ -36,8 +41,24 @@ import torch
 from mjlab.envs import ManagerBasedRlEnvCfg
 
 from robot_safety_sandbox.envs.velocity.g1 import unitree_g1_flat_env_cfg
+from robot_safety_sandbox.margins import compose
 
-# --- g (safety): don't fall ---------------------------------------------------
+# THE MARGINS, declared separately so every task says which ones it uses:
+#
+#   avoid margin g   g_fall     don't fall: pelvis height, pelvis tilt, non-foot
+#                               ground contact. Shared by EVERY G1 task.
+#   reach margin l   l_stance   the stance band (g1_stabilize*)
+#                    l_track    the velocity command (g1_locomote*)
+#
+# and a task registers them with margins.compose:
+#
+#   reach-avoid   margin_fn=compose(g_fall, l_stance)     mode=REACH_AVOID
+#   avoid only    margin_fn=compose(g_fall)               mode=AVOID
+#
+# (compose clamps both to +-CLAMP and tags the avoid-only case has_target=False,
+# which the registry checks against the mode.)
+
+# --- avoid margin g_fall: don't fall -------------------------------------------
 # Pelvis height. Nominal stance (the knees-bent keyframe) is 0.76 m; a fall puts
 # it under ~0.35 m. 0.45 leaves room for a deep squat, and the 0.25 m scale makes
 # the nominal stance g_height ~ 1.2, i.e. O(1) like every other margin here.
@@ -58,7 +79,7 @@ CONTACT_FORCE_THRESHOLD = 10.0
 # every other transition in the batch.
 CLAMP = 3.0
 
-# --- l (reach): the stance band ----------------------------------------------
+# --- reach margin l_stance: the stance band (g1_stabilize*) --------------------
 # EVERY l term below is divided by its own tolerance, so each reads "fraction of
 # the way to the edge of the target set" and the min over them is not decided by
 # whichever term happens to be measured in the smallest unit. (The Go2's stance
@@ -73,7 +94,7 @@ STANCE_COS = math.cos(math.radians(25.0))
 LIN_TOL = 0.25
 ANG_TOL = 0.30
 
-# --- l (reach): command tracking ---------------------------------------------
+# --- reach margin l_track: the velocity command (g1_locomote*) -----------------
 LOCO_VEL_TOL = 0.5
 
 #: Default forward command for the locomotion task (m/s). A comfortable G1 walk;
@@ -103,9 +124,9 @@ def _nonfoot_contact_margin(env) -> torch.Tensor | None:
   return (CONTACT_FORCE_THRESHOLD - mag) / CONTACT_FORCE_THRESHOLD
 
 
-def _g_fall(env) -> torch.Tensor:
-  """g: pelvis height, torso tilt, and non-foot ground contact — the humanoid
-  failure margin. g < 0 == fallen."""
+def g_fall(env) -> torch.Tensor:
+  """AVOID margin: pelvis height, pelvis tilt, and non-foot ground contact —
+  the humanoid failure margin. g < 0 == fallen. Unclamped; ``compose`` clamps."""
   d = env.scene["robot"].data
   base_z = d.root_link_pos_w[:, 2]
   up = -d.projected_gravity_b[:, 2]        # cos(angle from vertical)
@@ -116,12 +137,16 @@ def _g_fall(env) -> torch.Tensor:
   return torch.stack(terms, dim=0).amin(dim=0)
 
 
-def stance_margins(env):
-  """(g, l): fall safety + stabilize-to-stance target.
+#: The old private name; ``envs/g1_waist`` builds its own margins on it.
+_g_fall = g_fall
 
-  l >= 0 == standing: pelvis inside the height band, roughly upright, and both
-  velocities small. A G1 spawned on the knees-bent keyframe already satisfies it
-  (as a Go2 does in ``go2_stabilize``), so the reach-avoid value here answers
+
+def l_stance(env) -> torch.Tensor:
+  """REACH margin for stabilization: l >= 0 == standing — pelvis inside the
+  height band, roughly upright, and both velocities small. Unclamped.
+
+  A G1 spawned on the knees-bent keyframe already satisfies it (as a Go2 does
+  in ``go2_stabilize``), so the reach-avoid value of ``g1_stabilize`` answers
   "can it hold / RETURN to that stance despite the adversary", not "can it ever
   touch it" — which is why the task keeps the default ``end_criterion="failure"``
   and never ends an episode on reach.
@@ -130,7 +155,7 @@ def stance_margins(env):
   base_z = d.root_link_pos_w[:, 2]
   up = -d.projected_gravity_b[:, 2]
   v_b, w_b = d.root_link_lin_vel_b, d.root_link_ang_vel_b
-  l = torch.stack([
+  return torch.stack([
     (PELVIS_BAND - (base_z - PELVIS_MID).abs()) / PELVIS_BAND,
     (up - STANCE_COS) / (1.0 - STANCE_COS),
     (LIN_TOL - v_b[:, 0].abs()) / LIN_TOL,
@@ -140,23 +165,26 @@ def stance_margins(env):
     (ANG_TOL - w_b[:, 1].abs()) / ANG_TOL,
     (ANG_TOL - w_b[:, 2].abs()) / ANG_TOL,
   ], dim=0).amin(dim=0)
-  return _g_fall(env).clamp(-CLAMP, CLAMP), l.clamp(-CLAMP, CLAMP)
 
 
-def locomote_margins(env):
-  """(g, l): fall safety + velocity-command-tracking target.
-
-  l >= 0 == walking at the command (planar body-frame velocity within
-  ``LOCO_VEL_TOL`` of it), normalized by that tolerance so l = 1 at perfect
-  tracking — the same O(1) scale as g, which matters because the reach-avoid
-  backup compares the two directly in ``min(g, max(l, gamma V'))``.
-  """
+def l_track(env) -> torch.Tensor:
+  """REACH margin for locomotion: l >= 0 == walking at the command (planar
+  body-frame velocity within ``LOCO_VEL_TOL`` of it), normalized by that
+  tolerance so l = 1 at perfect tracking — the same O(1) scale as g, which
+  matters because the reach-avoid backup compares the two directly in
+  ``min(g, max(l, gamma V'))``. Unclamped."""
   d = env.scene["robot"].data
   v_b = d.root_link_lin_vel_b[:, :2]
   cmd = env.command_manager.get_command("twist")[:, :2]
   err = torch.linalg.norm(v_b - cmd, dim=1)
-  l = (LOCO_VEL_TOL - err) / LOCO_VEL_TOL
-  return _g_fall(env).clamp(-CLAMP, CLAMP), l.clamp(-CLAMP, CLAMP)
+  return (LOCO_VEL_TOL - err) / LOCO_VEL_TOL
+
+
+#: Ready-composed (g, l) pairs, for code that takes a margin_fn rather than the
+#: separate margins (the arm-adversary l shaping, the recover rest termination).
+#: Task registrations spell the composition out instead -- see the top of the file.
+stance_margins = compose(g_fall, l_stance, clamp=CLAMP)
+locomote_margins = compose(g_fall, l_track, clamp=CLAMP)
 
 
 def _pin_twist(cfg, vx: float) -> None:

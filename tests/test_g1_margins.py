@@ -164,3 +164,43 @@ def test_stance_target_rejects_a_moving_robot():
   assert _l_stance(_Env(ang_vel=(0.0, 0.0, 2.0))) < 0.0
   assert _l_stance(_Env(tilt_cos=_cos(40.0))) < 0.0   # past the 25 deg band
   assert _l_stance(_Env(pelvis_z=0.50)) < 0.0             # under the band floor
+
+
+# --- the declarations -----------------------------------------------------------
+
+def test_g1_tasks_declare_their_avoid_and_reach_margins():
+  """Every G1 stabilize / recover task spells its margins out: reach-avoid tasks
+  declare avoid g_fall plus a reach margin, avoid-only tasks g_fall alone."""
+  import robot_safety_sandbox  # noqa: F401  (registers on import)
+  from robot_safety_sandbox.envs.g1_stabilize.env_cfg import g_fall, l_stance, l_track
+  from robot_safety_sandbox.registry import AVOID, REACH_AVOID, spec
+  expect = {
+    "g1_stabilize": (REACH_AVOID, l_stance), "g1_locomote": (REACH_AVOID, l_track),
+    "g1_stabilize_arm_random": (REACH_AVOID, l_stance),
+    "g1_locomote_arm_random": (REACH_AVOID, l_track),
+    "g1_stabilize_arm_random_avoid": (AVOID, None),
+    "g1_recover": (AVOID, None), "g1_recover_wrench": (AVOID, None),
+    "g1_recover_push": (AVOID, None), "g1_recover_push_fast": (AVOID, None),
+    "g1_recover_arm_random": (AVOID, None), "g1_recover_arm_random_wrench": (AVOID, None),
+  }
+  for tid, (mode, reach) in expect.items():
+    s = spec(tid)
+    assert s.mode == mode, tid
+    assert s.margin_fn.avoid_margin is g_fall, tid
+    assert s.margin_fn.reach_margin is reach, tid
+
+
+def test_composed_pairs_match_the_separate_margins():
+  """stance_margins / locomote_margins are compose(g_fall, l_*): the clamped
+  pair, value for value."""
+  from robot_safety_sandbox.envs.g1_stabilize.env_cfg import g_fall, l_stance, l_track
+  for env in (_Env(pelvis_z=0.30, tilt_cos=_cos(60.0), lin_vel=(2.0, 0.1, 0.0),
+                  ang_vel=(0.0, 0.5, 0.0), contact_n=300.0),
+              _Env(pelvis_z=0.76, tilt_cos=_cos(10.0), lin_vel=(0.1, 0.0, 0.0))):
+    g, l = stance_margins(env)
+    assert torch.allclose(g, g_fall(env).clamp(-CLAMP, CLAMP))
+    assert torch.allclose(l, l_stance(env).clamp(-CLAMP, CLAMP))
+  lenv = _Env(lin_vel=(0.6, 0.0, 0.0), cmd=(1.0, 0.0))
+  g2, l2 = locomote_margins(lenv)
+  assert torch.allclose(g2, g_fall(lenv).clamp(-CLAMP, CLAMP))
+  assert torch.allclose(l2, l_track(lenv).clamp(-CLAMP, CLAMP))

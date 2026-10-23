@@ -220,6 +220,9 @@ def compose(g_fn, l_fn=None, clamp: float = CLAMP):
       return g, torch.zeros_like(g)  # placeholder; avoid learners ignore it
     return g, l_fn(env).clamp(-clamp, clamp)
   margin_fn.has_target = l_fn is not None
+  # What the task declared, for inspection: the avoid margin, and the reach
+  # margin (None for an avoid-only task).
+  margin_fn.avoid_margin, margin_fn.reach_margin = g_fn, l_fn
   return margin_fn
 
 

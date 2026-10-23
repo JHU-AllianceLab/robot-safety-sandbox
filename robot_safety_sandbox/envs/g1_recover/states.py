@@ -7,6 +7,9 @@ PD targets the joints were tracking). ``examples/harvest_g1_recover_states.py``
 writes a bank of them to one ``.pt`` file; the training spawn
 (``envs/g1_recover/spawn.py``) and the harvester's own replay check restore
 them through :func:`write_states`, so what is validated is what is trained on.
+Other producers (the mocap builder, the start-state labeler, the handover
+harvesters) write the same schema through :func:`save_bank`, and the spawn can
+train on several banks at once (:func:`load_bank` with a list of paths).
 
 HEADING FRAME. The G1's observations are invariant to position on a flat plane
 and to heading (body-frame twist, projected gravity, joint states), so a state
@@ -26,7 +29,8 @@ DATASET FIELDS (all tensors share the leading row dimension N):
     action (N, 29)         the last applied action (mjlab action order)
     command (N, 3)         the walker's twist command at the snapshot (label)
     phase_step (N,)        episode step mod the gait period (replay check only)
-    kind (N,)              KIND_CLEAN / KIND_PUSHED / KIND_SYNTHETIC
+    kind (N,)              KIND_CLEAN / KIND_PUSHED / KIND_SYNTHETIC /
+                           KIND_MOCAP / KIND_HANDOVER
     fell (N,)              the walker fell within the label window (walker rows)
     time_to_fall (N,)      s from snapshot to that fall; NaN if it survived
     push_severity (N,)     push size in [0, 1] (0 for clean rows)
@@ -35,11 +39,63 @@ DATASET FIELDS (all tensors share the leading row dimension N):
     env_id (N,)            the harvest env the row came from (replay check)
 
 plus ``meta`` (a plain dict: source policy, task, ranges, counts).
+
+OPTIONAL FIELDS (:data:`OPTIONAL_FIELDS`). Columns only some producers write:
+the mocap builder's provenance, the start-state labeler's labels, a handover
+harvester's pending push. :func:`load_bank` returns EVERY one of them, filled
+with its documented default where a file lacks it, so a consumer never has to
+ask which producer wrote a bank and banks of different producers concatenate:
+
+    clip (N,)              index into the clip names of the row's file
+                           (``meta["clips"]``; -1 = not a clip frame)
+    category (N,)          index into ``meta["categories"]`` (-1)
+    t (N,)                 s into the clip (NaN)
+    airborne (N,)          no sole near the floor at that frame (False)
+    frame (N,)             50 fps frame index within the clip (-1)
+    next_ok (N,)           how many of the following rows continue the same
+                           clip, contiguously at 50 fps: a replay of rows
+                           i+1 .. i+k stays inside the clip iff next_ok >= k (0)
+    start_ok (N,)          the spawn may start an episode here (True). False
+                           keeps a row for replay / bookkeeping only; no
+                           sampler ever spawns it
+    p_surv (N,)            P(survive) of the labeling policy from this row,
+                           from rollouts (NaN = unlabeled)
+    n_label (N,)           rollouts behind p_surv (0)
+    value0 (N,)            the labeling policy's critic value at the row (NaN)
+    p_value (N,)           value0 mapped to a probability (NaN)
+    ttf_mean (N,)          mean time-to-fall of the failed rollouts, s (NaN)
+    push_force_h (N, 3)    a PENDING push still acting at the row, N, in the
+                           row's HEADING frame (the twist's frame); the spawn
+                           rotates it by its fresh yaw (0 = none)
+    push_left_steps (N,)   control steps that push still acts (0 = none)
+    push_impulse (N,)      N*s of the push that produced the row (NaN)
+    handover_delay_s (N,)  time from the push onset to the handover, s, as the
+                           harvester defined it (NaN)
+    push_duration_s (N,)   that push's full duration, s (NaN)
+    push_onset_s (N,)      its onset after the replay start, s (NaN)
+    push_rel (N,)          its heading-frame angle, rad (0 = from behind; NaN)
+    src_row (N,)           the library row the replay started from (-1)
+    monitor_value (N,)     the monitor's value at a monitor-rule handover (NaN)
+    value (N,)             the frontier harvester's policy value at the
+                           snapshot (NaN)
+    delay_steps (N,)       the frontier harvester's steps from the push end to
+                           the snapshot (-1)
+
+SEVERAL FILES. ``load_bank([a, b, ...])`` concatenates the files' rows in the
+given order and adds ``part`` (the index of the file each row came from); its
+``meta`` is ``{"parts": [meta_a, meta_b, ...], "paths": [...]}``. Indices that
+point into a file's own meta (``clip``, ``category``) are NOT remapped: the
+name of row i's clip is ``meta["parts"][part[i]]["clips"][clip[i]]``. A single
+path (a plain ``str``) loads exactly as before: ``meta`` is that file's own
+dict and ``part`` is zero (or the file's own ``part`` column, so a merged bank
+written back with :func:`save_bank` keeps resolving its names).
 """
 
 from __future__ import annotations
 
 import math
+import os
+from typing import Sequence, Union
 
 import torch
 
@@ -56,11 +112,46 @@ from mjlab.utils.lab_api.math import (
 KIND_CLEAN = 0       # walker mid-gait, undisturbed
 KIND_PUSHED = 1      # walker 0-300 ms after a random push
 KIND_SYNTHETIC = 2   # default stance + random tilt / twist / joint offsets
+KIND_MOCAP = 3       # a kinematic retargeted-mocap frame (no controller made it)
+KIND_HANDOVER = 4    # captured at a handover to the fallback (after a replayed
+                     # clip + push, or a push under a recovery policy); may
+                     # carry a PENDING push that is still acting
 
 #: The fields every row carries (``meta`` rides alongside).
 FIELDS = ("root_z", "root_quat_h", "lin_vel_h", "ang_vel_h", "joint_pos",
           "joint_vel", "action", "command", "phase_step", "kind", "fell",
           "time_to_fall", "push_severity", "difficulty", "speed", "env_id")
+
+_NAN = float("nan")
+#: The optional fields (module docstring): name -> (dtype, trailing shape,
+#: fill value for a file that lacks the column).
+OPTIONAL_FIELDS: dict[str, tuple[torch.dtype, tuple[int, ...], object]] = {
+  "clip": (torch.long, (), -1),
+  "category": (torch.long, (), -1),
+  "t": (torch.float32, (), _NAN),
+  "airborne": (torch.bool, (), False),
+  "frame": (torch.long, (), -1),
+  "next_ok": (torch.long, (), 0),
+  "start_ok": (torch.bool, (), True),
+  "p_surv": (torch.float32, (), _NAN),
+  "n_label": (torch.long, (), 0),
+  "value0": (torch.float32, (), _NAN),
+  "p_value": (torch.float32, (), _NAN),
+  "ttf_mean": (torch.float32, (), _NAN),
+  "push_force_h": (torch.float32, (3,), 0.0),
+  "push_left_steps": (torch.long, (), 0),
+  "push_impulse": (torch.float32, (), _NAN),
+  "handover_delay_s": (torch.float32, (), _NAN),
+  # the harvesters' analysis columns, kept so a labeled copy of a bank (and
+  # every later reader) still has them
+  "push_duration_s": (torch.float32, (), _NAN),
+  "push_onset_s": (torch.float32, (), _NAN),
+  "push_rel": (torch.float32, (), _NAN),
+  "src_row": (torch.long, (), -1),
+  "monitor_value": (torch.float32, (), _NAN),
+  "value": (torch.float32, (), _NAN),
+  "delay_steps": (torch.long, (), -1),
+}
 
 #: The G1 sole collision capsules: 7 per foot (``left_foot1..7_collision``).
 SOLE_GEOMS = tuple(f"{side}_foot{i}_collision"
@@ -83,6 +174,14 @@ def from_heading_frame(quat_h: torch.Tensor, lin_vel_h: torch.Tensor,
   q_yaw = quat_from_euler_xyz(zero, zero, yaw)
   return (quat_mul(q_yaw, quat_h), quat_apply(q_yaw, lin_vel_h),
           quat_apply(q_yaw, ang_vel_h))
+
+
+def heading_to_world(vec_h: torch.Tensor, yaw: torch.Tensor) -> torch.Tensor:
+  """Heading-frame vectors ``(N, 3)`` -> world, at heading ``yaw``: the rotation
+  :func:`from_heading_frame` applies to the twist (a stored pending push force
+  is placed with it, so it keeps its angle to the restored body)."""
+  zero = torch.zeros_like(yaw)
+  return quat_apply(quat_from_euler_xyz(zero, zero, yaw), vec_h)
 
 
 def snapshot(env) -> dict[str, torch.Tensor]:
@@ -173,15 +272,74 @@ def tilt_deg(quat_h: torch.Tensor) -> torch.Tensor:
   return torch.rad2deg(torch.acos(up[:, 2].clamp(-1.0, 1.0)))
 
 
-def load_bank(path: str, device) -> dict:
-  """Load a saved bank onto ``device``; ``meta`` stays a plain dict."""
+def optional_column(name: str, n: int, device) -> torch.Tensor:
+  """The default (fill-value) column of optional field ``name`` for ``n`` rows."""
+  dtype, shape, fill = OPTIONAL_FIELDS[name]
+  return torch.full((int(n), *shape), fill, dtype=dtype, device=device)
+
+
+def _load_one(path: str, device) -> dict:
+  """One file: FIELDS as stored, every OPTIONAL field (filled where absent),
+  the file's own ``part`` column if it has one, and its meta. Other columns are
+  dropped, as they always were."""
   raw = torch.load(path, map_location=device, weights_only=False)
   missing = [f for f in FIELDS if f not in raw]
   if missing:
     raise ValueError(f"{path}: not a g1_recover state bank, missing {missing}")
   bank = {f: raw[f].to(device) for f in FIELDS}
+  n = int(bank["kind"].shape[0])
+  for name, (dtype, shape, _fill) in OPTIONAL_FIELDS.items():
+    if name not in raw:
+      bank[name] = optional_column(name, n, device)
+      continue
+    col = raw[name].to(device=device, dtype=dtype)
+    if tuple(col.shape) != (n, *shape):
+      raise ValueError(f"{path}: optional field {name!r} has shape "
+                       f"{tuple(col.shape)}, expected {(n, *shape)}")
+    bank[name] = col
+  part = raw.get("part")
+  if torch.is_tensor(part) and tuple(part.shape) == (n,):
+    bank["part"] = part.to(device=device, dtype=torch.long)
   bank["meta"] = raw.get("meta", {})
   return bank
+
+
+def load_bank(path_or_paths: Union[str, Sequence[str]], device) -> dict:
+  """Load a saved bank (one path) or the concatenation of several (a list or
+  tuple of paths) onto ``device``; ``meta`` stays a plain dict.
+
+  Returns FIELDS, every :data:`OPTIONAL_FIELDS` key, ``part`` (long per row:
+  the index of the source file) and ``meta`` -- that file's own meta for a
+  single ``str`` path, ``{"parts": [...], "paths": [...]}`` for a list (even
+  of one path), see the module docstring."""
+  if isinstance(path_or_paths, (str, os.PathLike)):
+    bank = _load_one(os.fspath(path_or_paths), device)
+    if "part" not in bank:
+      bank["part"] = torch.zeros(int(bank["kind"].shape[0]), dtype=torch.long,
+                                 device=device)
+    return bank
+  paths = [os.fspath(p) for p in path_or_paths]
+  if not paths:
+    raise ValueError("load_bank: empty list of paths")
+  parts = [_load_one(p, device) for p in paths]
+  bank = {k: torch.cat([b[k] for b in parts])
+          for k in FIELDS + tuple(OPTIONAL_FIELDS)}
+  bank["part"] = torch.cat([
+    torch.full((int(b["kind"].shape[0]),), i, dtype=torch.long, device=device)
+    for i, b in enumerate(parts)])
+  bank["meta"] = {"parts": [b["meta"] for b in parts], "paths": paths}
+  return bank
+
+
+def save_bank(bank: dict, path: str) -> None:
+  """Write ``bank`` to ``path`` the way :func:`load_bank` reads it: every
+  tensor detached to the CPU (a bank built on the GPU reloads anywhere), every
+  other value (``meta``) as-is; parent directories are created."""
+  out = {k: (v.detach().cpu() if torch.is_tensor(v) else v)
+         for k, v in bank.items()}
+  parent = os.path.dirname(os.path.abspath(path))
+  os.makedirs(parent, exist_ok=True)
+  torch.save(out, path)
 
 
 def sample_yaw_xy(n: int, device, xy_half: float = 0.5):

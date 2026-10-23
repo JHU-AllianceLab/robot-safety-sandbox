@@ -4,7 +4,7 @@ tasks/g1_waist.py, filters/switch.py).
 CPU, simulator-free (stubs for the mjlab env):
   * the goal margin l_box -- normalized per term, zero at each tolerance, and
     blind to the velocity components that are not part of the goal;
-  * the stay margins are avoid-only on min(g, soft_floor(l_box)), a failure
+  * the stay margins are avoid-only on min(g, soft_tail(l_box)), a failure
     termination anchored at -CLAMP; the reach margins take
     min(l_box, V_stay) and refuse to run without a frozen stay value;
   * the waist goal command -- sampling range = scale * max_angle, and a goal a
@@ -36,8 +36,8 @@ from robot_safety_sandbox.envs.g1_stabilize.env_cfg import CLAMP  # noqa: E402
 from robot_safety_sandbox.envs.g1_waist.command import (  # noqa: E402
   MAX_ANGLE, WaistTargetCommand, WaistTargetCommandCfg)
 from robot_safety_sandbox.envs.g1_waist.env_cfg import (  # noqa: E402
-  L_FLOOR, Q_TOL, V_TOL, reach_margins, soft_floor, stay_margins,
-  target_margin)
+  L_TAIL, Q_TOL, V_TOL, WAIST_ACTION_SCALE, WAIST_GAIN_MULT, reach_margins,
+  soft_tail, stay_margins, target_margin)
 
 # --- stubs ---------------------------------------------------------------------
 
@@ -133,25 +133,31 @@ def test_stay_is_avoid_only_on_safe_and_in_goal():
   # on the goal but fallen (pelvis under 0.45 m) -> violated too
   h, _ = stay_margins(_Env(pelvis_z=0.3))
   assert float(h) < 0.0
-  # a box violation, however large, stays above the soft floor ...
-  h, _ = stay_margins(_Env(waist=(0.2 + 50 * Q_TOL, -0.1)))
-  assert -L_FLOOR <= float(h) < -0.99 * L_FLOOR
+  # a bigger box violation scores worse, but stays well above the clamp ...
+  h_near, _ = stay_margins(_Env(waist=(0.2 + 3 * Q_TOL, -0.1)))
+  h_far, _ = stay_margins(_Env(waist=(0.2 + 9 * Q_TOL, -0.1)))   # ~ the joint range
+  assert -CLAMP + 1.0 < float(h_far) < float(h_near) < 0.0
   # ... while a fall still reaches the clamp
   h, _ = stay_margins(_Env(pelvis_z=-1.0))
   assert float(h) == -CLAMP
 
 
-def test_soft_floor_is_identity_inside_and_saturates_outside():
+def test_soft_tail_is_identity_inside_and_compressed_but_increasing_outside():
   l = torch.tensor([2.0, 1.0, 0.3, 0.0])
-  assert torch.equal(soft_floor(l), l)
-  # matches l to first order just past the edge, bends toward -L_FLOOR beyond
-  assert float(soft_floor(torch.tensor([-1e-3]))) == pytest.approx(-1e-3, rel=1e-5)
-  assert float(soft_floor(torch.tensor([-L_FLOOR]))) == pytest.approx(
-    L_FLOOR * math.tanh(-1.0))
-  # (float32 tanh reaches exactly -L_FLOOR by l = -3: bounded, not strictly)
-  far = soft_floor(torch.tensor([-1.0, -3.0, -100.0]))
-  assert bool((far >= -L_FLOOR).all()) and bool((far[1:] < -0.99 * L_FLOOR).all())
-  assert bool((far[:-1] >= far[1:]).all())                # still monotone
+  assert torch.equal(soft_tail(l), l)
+  # matches l to first order just past the edge, asinh-compressed beyond
+  assert float(soft_tail(torch.tensor([-1e-3]))) == pytest.approx(-1e-3, rel=1e-5)
+  assert float(soft_tail(torch.tensor([-L_TAIL]))) == pytest.approx(
+    L_TAIL * math.asinh(-1.0))
+  # strictly increasing everywhere (no flat tail), and a violation the size of
+  # the waist's whole range (l ~ -8) or a 2 m/s velocity error (l = -19) stays
+  # well above -CLAMP, where a fall is valued
+  far = soft_tail(torch.tensor([-1.0, -4.0, -8.2, -19.0]))
+  assert bool((far[:-1] > far[1:]).all())
+  assert float(far.min()) > -CLAMP + 0.5
+  x = torch.tensor([-4.0], requires_grad=True)
+  soft_tail(x).sum().backward()
+  assert float(x.grad) > 0.1                              # still a gradient
 
 
 def test_stay_failure_termination_is_anchored_at_the_clamp():
@@ -447,6 +453,35 @@ def test_stay_spawn_stance_is_varied_with_both_feet_flat_on_the_floor():
     assert float(d.root_link_pos_w[:, 2].std()) > 0.02
   finally:
     env.close()
+
+
+@_gpu
+def test_waist_tasks_stiffen_the_waist_and_leave_other_g1_tasks_stock():
+  import mujoco
+  from robot_safety_sandbox import make_tensor
+  from robot_safety_sandbox.envs.g1_waist.command import WAIST_JOINTS
+
+  def waist(env):
+    m = env.mj.sim.mj_model
+    act = env.mj.action_manager.get_term("joint_pos")
+    names = list(act.target_names)
+    out = []
+    for j in WAIST_JOINTS:
+      a = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, "robot/" + j)
+      out.append((float(m.actuator_gainprm[a, 0]), float(-m.actuator_biasprm[a, 2]),
+                  float(act._scale[0, names.index(j)])))
+    return out
+  stay = make_tensor("g1_waist_stay_arm_random", 2, "cuda:0")
+  stock = make_tensor("g1_stabilize_arm_random", 2, "cuda:0")   # built AFTER
+  try:
+    for (kp, kd, sc), (kp0, kd0, sc0) in zip(waist(stay), waist(stock)):
+      assert kp == pytest.approx(WAIST_GAIN_MULT * kp0, rel=1e-4)
+      assert kd == pytest.approx(WAIST_GAIN_MULT * kd0, rel=1e-4)
+      assert sc == pytest.approx(WAIST_ACTION_SCALE) and sc0 != pytest.approx(sc)
+      assert kp0 == pytest.approx(28.5, rel=1e-2)          # stock untouched
+  finally:
+    stay.close()
+    stock.close()
 
 
 @_gpu

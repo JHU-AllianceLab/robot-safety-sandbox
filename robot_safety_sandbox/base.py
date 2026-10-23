@@ -214,7 +214,7 @@ class _MjlabCore:
                  joint_noise=None, hybrid_skill=None,
                  latch_margin_fn=None, end_criterion="failure",
                  cfg_overrides=None, dense_margins=False, action_bound=1.0,
-                 critic_obs_key=None):
+                 critic_obs_key=None, random_push=None, regime_force_buckets=0):
     self.obs_key = obs_key  # resolved after first reset (auto-detect)
     # Privileged (asymmetric) critic obs group. OPT-IN: surfaced to the learner
     # ONLY when critic_obs_key is explicitly requested (the factory passes it when
@@ -311,6 +311,30 @@ class _MjlabCore:
           "joint_noise and adversary=True would both drive the same joint "
           "slice; with dstb_mode='joint' a scripted-disturbance task is "
           "single-player.")
+    # SCRIPTED random pushes (random_push.RandomPush): the single-player stand-in
+    # for a wrench adversary. The same channel -- an external force on
+    # adversary_body at force_max x force_scale, so the force ramp and the
+    # per-env survival scale act on it unchanged -- driven by a random process
+    # (direction, onset, duration) instead of a learned player. random_push is
+    # that process's kwargs ({} = its defaults); None = off. Built after the
+    # mjlab env below (it needs the control dt).
+    self._push = None
+    if random_push is not None:
+      if self.adversary:
+        raise ValueError(
+          "random_push and adversary=True would both write the wrench on "
+          "adversary_body; a random-push task is single-player.")
+      if self.dstb_mode != "wrench":
+        raise ValueError(
+          f"random_push is an external force on adversary_body and needs "
+          f"dstb_mode='wrench', not dstb_mode={self.dstb_mode!r}.")
+    # Per-episode REGIMES for a multi-gamma learner (safety_sb3 gamma ladder):
+    # spawn source (published by the task's spawn as mj._zoo_spawn_source) x
+    # the per-env force scale quantized into this many buckets (0 = no force
+    # component). See regime().
+    self._regime_buckets = int(regime_force_buckets)
+    if self._regime_buckets < 0:
+      raise ValueError(f"regime_force_buckets must be >= 0, got {regime_force_buckets}")
     self.dense_reward = bool(dense_reward)  # Stage-1: train on the env reward
     # dense reward AND margins: the reward stays the env's dense stack, while
     # (g, l) are computed alongside it for a train-time filter / failure
@@ -365,6 +389,10 @@ class _MjlabCore:
       self._adv_body_ids = []  # action-mode dstb needs no body
     self._all_ids = torch.arange(int(num_envs), device=device)
     self._zero_wrench = torch.zeros((int(num_envs), 1, 3), device=device)
+    if random_push is not None:
+      from .random_push import RandomPush
+      self._push = RandomPush(int(num_envs), float(self.mj.step_dt), device,
+                              **random_push)
     self._log: dict = {}
     # HYBRID ROLLOUTS (funnel composition): when hybrid_skill is set, any env
     # whose LAST-step reach margin l went positive is latched to the FROZEN
@@ -379,6 +407,11 @@ class _MjlabCore:
     self._hyb_latch = torch.zeros(int(num_envs), dtype=torch.bool, device=device)
     self._last_l = None
     obs_dict, _ = self.mj.reset()
+    if self._push is not None:
+      # The process was reset when it was built; this reset's spawn may have
+      # handed some envs a pending push (see _apply_pending_push).
+      self._apply_pending_push()
+      self.mj._zoo_push_quiet = self._push.quiet()
     # The FULL obs dict of the last transition. The bridges expose one group
     # (self.obs_key) because a learner consumes one; an EVALUATION composes two
     # policies that may read DIFFERENT groups (a blind nominal walker off
@@ -512,6 +545,33 @@ class _MjlabCore:
     self._hold_t += float(self.mj.step_dt)
     return out
 
+  def _apply_pending_push(self, mask: Optional[torch.Tensor] = None) -> None:
+    """Hand the push process what each RESTARTED env's start state carries
+    (``mask`` = the envs just reset; None = all). Call it right after
+    ``self._push.reset(mask)``.
+
+    A start state captured at a handover (g1_recover's KIND_HANDOVER rows) may
+    come with a push that was still acting when it was captured; the spawn
+    publishes it for the episode it just started as ``mj._zoo_pending_push``
+    (``force_w`` [n, 3] N world frame, ``steps`` [n] control steps left,
+    ``consume`` [n]: the row's push already happened). Here a pending push
+    becomes a scripted push of that exact force, resumed on the FIRST step of
+    the new episode (onset 0) for its remaining steps, and a consumed row gets
+    no random push for the rest of its episode. A task whose spawn publishes
+    nothing is unchanged."""
+    push = getattr(self, "_push", None)
+    pend = getattr(self.mj, "_zoo_pending_push", None)
+    if push is None or pend is None:
+      return
+    m = (torch.ones(push.n, dtype=torch.bool, device=push.device) if mask is None
+         else mask.reshape(-1).bool())
+    push.exhaust(m & pend["consume"].reshape(-1).bool())
+    force_w = pend["force_w"].reshape(-1, 3).float()
+    mag = force_w.norm(dim=1)
+    steps = pend["steps"].reshape(-1).long()
+    push.schedule(m & (steps > 0), force_n=mag, steps=steps, onset=0,
+                  dir_w=force_w / mag.clamp_min(1e-9).unsqueeze(1))
+
   def _mj_step(self, actions: torch.Tensor):
     ctrl = actions[:, :self.ctrl_dim] * self.ctrl_gain
     if self.adversary:
@@ -541,6 +601,25 @@ class _MjlabCore:
           a_f = torch.clamp(pol._predict(nobs, deterministic=True), -1.0, 1.0)
         ctrl = torch.where(self._hyb_latch.unsqueeze(-1),
                            a_f * self.ctrl_gain, ctrl)
+    push = getattr(self, "_push", None)
+    if push is not None:
+      # The random push writes the adversary's channel (adversary=True is
+      # refused with it): force_max x per-env force_scale, zeros where quiet.
+      # The pelvis heading places rear-biased directions and labels each push
+      # by the side it comes from.
+      scale = getattr(self, "force_scale", None)
+      f, active = push.forces(self.force_max, scale, self._robot.data.heading_w)
+      self._robot.write_external_wrench_to_sim(
+        f.reshape(-1, 1, 3), self._zero_wrench, body_ids=self._adv_body_ids,
+        env_ids=self._all_ids)
+      # Read INSIDE mj.step by a push-gated target margin (the termination and
+      # reward managers grade the state this step produces): quiet = no push
+      # left this episode, and the push applied in THIS step counts as active.
+      self.mj._zoo_push_quiet = push.quiet()
+      self._log["push/force_max_N"] = float(self.force_max)
+      self._log["push/active_frac"] = float(active.float().mean())
+      if scale is not None:
+        self._log["push/scale_mean"] = float(scale.mean())
     obs_dict, _r, terminated, truncated, extras = self.mj.step(ctrl)
     self._obs_dict = obs_dict
     obs = obs_dict[self.obs_key].float()
@@ -577,6 +656,11 @@ class _MjlabCore:
       # mjlab has already auto-reset these envs; their next command restarts
       # from the pose the reset put the joints in (see _reset_joint_noise).
       self._reset_joint_noise(terminated | truncated)
+    if push is not None:
+      self._log.update(push.record(terminated | truncated, terminated))
+      push.reset(terminated | truncated)   # a new episode starts quiet
+      self._apply_pending_push(terminated | truncated)
+      self.mj._zoo_push_quiet = push.quiet()
     # Always-on training-safety accounting. The margin is the task's g: the
     # returned reward-slot on a safety/reach-avoid env, the alongside-computed
     # _safety_g on a dense-reward+margins env, and absent on a plain cumulative
@@ -615,6 +699,41 @@ class _MjlabCore:
       return None
     c = self._obs_dict[self.critic_obs_key].float()
     return torch.nan_to_num(c, nan=0.0, posinf=0.0, neginf=0.0)
+
+  # --- per-episode regimes (safety_sb3 multi-gamma ladder) --------------------
+  @property
+  def n_regimes(self) -> int:
+    """Spawn sources x force buckets (1 when the task exposes neither)."""
+    n_src = int(getattr(self.mj, "_zoo_n_spawn_sources", 1) or 1)
+    return n_src * max(int(getattr(self, "_regime_buckets", 0)), 1)
+
+  def regime(self) -> Optional[torch.Tensor]:
+    """The regime of each env's CURRENT episode, ``[num_envs]`` long, or None.
+
+    ``source * buckets + bucket``: the spawn source the task's spawn published
+    for this episode (``mj._zoo_spawn_source``, written at the reset, so it
+    already names the new episode right after an auto-reset) and the per-env
+    force scale (PerEnvForceScaleCallback's ``force_scale``, moved only at
+    episode ends) quantized into ``regime_force_buckets`` equal buckets of
+    [0, 1]. Both are fixed for the episode, as the learner's contract asks
+    (safety_sb3.tensor_env.TensorVecEnv.regime). The learner copies the tensor.
+    """
+    buckets = int(getattr(self, "_regime_buckets", 0))
+    src = getattr(self.mj, "_zoo_spawn_source", None)
+    if src is None and buckets == 0:
+      return None
+    n = int(self.mj.num_envs)
+    dev = self.mj.device
+    r = (src.reshape(-1).long() if src is not None
+         else torch.zeros(n, dtype=torch.long, device=dev))
+    if buckets > 0:
+      scale = getattr(self, "force_scale", None)
+      if scale is None:
+        b = torch.zeros(n, dtype=torch.long, device=dev)
+      else:
+        b = (scale.reshape(-1).clamp(0.0, 1.0) * buckets).long().clamp_(max=buckets - 1)
+      r = r * buckets + b
+    return r
 
   def safety_margins(self) -> tuple[torch.Tensor, torch.Tensor]:
     """The task's (g, l) for the last step, on a DENSE-reward env.
@@ -762,7 +881,7 @@ class MjlabTensorSafetyEnv(_MjlabCore, TensorVecEnv):
                joint_noise=None, hybrid_skill=None,
                  latch_margin_fn=None, end_criterion="failure",
                cfg_overrides=None, dense_margins=False, action_bound=1.0,
-               critic_obs_key=None):
+               critic_obs_key=None, random_push=None, regime_force_buckets=0):
     if not _HAS_SAFETY_SB3:
       raise ImportError(
         "safety_sb3 is required for the tensor bridge (pip install it or put "
@@ -778,7 +897,8 @@ class MjlabTensorSafetyEnv(_MjlabCore, TensorVecEnv):
       hybrid_skill=hybrid_skill,
       latch_margin_fn=latch_margin_fn, end_criterion=end_criterion,
       cfg_overrides=cfg_overrides, dense_margins=dense_margins,
-      action_bound=action_bound, critic_obs_key=critic_obs_key)
+      action_bound=action_bound, critic_obs_key=critic_obs_key,
+      random_push=random_push, regime_force_buckets=regime_force_buckets)
     TensorVecEnv.__init__(self, int(num_envs), obs_space, act_space, device)
 
   def reset(self) -> torch.Tensor:
@@ -788,6 +908,10 @@ class MjlabTensorSafetyEnv(_MjlabCore, TensorVecEnv):
     self.mj._zoo_last_obs = obs
     if self._joint_noise is not None:
       self._reset_joint_noise()
+    if self._push is not None:
+      self._push.reset()
+      self._apply_pending_push()
+      self.mj._zoo_push_quiet = self._push.quiet()
     self._hyb_latch.zero_()
     self._last_l = None
     self._reach_ep = None      # every episode restarts: no reach carried over
@@ -818,7 +942,8 @@ class MjlabNumpySafetyEnv(_MjlabCore, VecEnv):
                dstb_gain=0.25, dstb_joint_slice=None, joint_noise=None,
                hybrid_skill=None, latch_margin_fn=None,
                end_criterion="failure", cfg_overrides=None,
-               dense_margins=False, action_bound=1.0, critic_obs_key=None):
+               dense_margins=False, action_bound=1.0, critic_obs_key=None,
+               random_push=None, regime_force_buckets=0):
     obs_space, act_space = self._init_core(
       num_envs, device, cfg_builder, margin_fn, ctrl_dim=ctrl_dim,
       dstb_dim=dstb_dim, ctrl_gain=ctrl_gain, force_max=force_max,
@@ -829,7 +954,8 @@ class MjlabNumpySafetyEnv(_MjlabCore, VecEnv):
       hybrid_skill=hybrid_skill,
       latch_margin_fn=latch_margin_fn, end_criterion=end_criterion,
       cfg_overrides=cfg_overrides, dense_margins=dense_margins,
-      action_bound=action_bound, critic_obs_key=critic_obs_key)
+      action_bound=action_bound, critic_obs_key=critic_obs_key,
+      random_push=random_push, regime_force_buckets=regime_force_buckets)
     self._device = device
     VecEnv.__init__(self, int(num_envs), obs_space, act_space)
     self._actions = None
@@ -839,6 +965,10 @@ class MjlabNumpySafetyEnv(_MjlabCore, VecEnv):
     self._obs_dict = obs_dict
     if self._joint_noise is not None:
       self._reset_joint_noise()
+    if self._push is not None:
+      self._push.reset()
+      self._apply_pending_push()
+      self.mj._zoo_push_quiet = self._push.quiet()
     self._reach_ep = None      # every episode restarts: no reach carried over
     return obs_dict[self.obs_key].float().cpu().numpy()
 

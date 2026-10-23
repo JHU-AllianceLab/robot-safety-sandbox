@@ -38,6 +38,12 @@ def _avoid_only_margins(env):
 _avoid_only_margins.has_target = False   # what margins.avoid_only() stamps on
 
 
+def _m(mode):
+  """The margin_fn a task of ``mode`` may declare: an avoid-only task declares
+  ONLY an avoid margin (has_target False); a reach-avoid one declares both."""
+  return _avoid_only_margins if mode == AVOID else _margins
+
+
 @pytest.fixture
 def clean_registry():
   """Register throwaway specs without leaking into the real task registry."""
@@ -89,7 +95,7 @@ def test_unknown_mode_is_refused(clean_registry):
 def test_spec_carries_no_learner_field(clean_registry):
   """The learner is DERIVED. A registration must not be able to pin one, and
   pipeline lineage lives in docs/log/experiments.md, not on the spec."""
-  s = registry.spec(_reg("t_fields", mode=AVOID, margin_fn=_margins))
+  s = registry.spec(_reg("t_fields", mode=AVOID, margin_fn=_m(AVOID)))
   assert not hasattr(s, "default_algo")
   assert not hasattr(s, "warmstart_from")
   with pytest.raises(TypeError):
@@ -105,7 +111,7 @@ def test_spec_carries_no_learner_field(clean_registry):
                                          (REACH_AVOID, "ReachAvoid")])
 def test_algo_name_is_mode_plus_algorithm_plus_players(
     clean_registry, family, alg, mode, prefix):
-  t = _reg(f"t_map_{mode}_{family}", mode=mode, margin_fn=_margins,
+  t = _reg(f"t_map_{mode}_{family}", mode=mode, margin_fn=_m(mode),
            supports_adversary=True)
   assert algo_name(t, family=family) == f"{prefix}{alg}1P"
   assert algo_name(t, adversary=True, family=family) == f"{prefix}{alg}2P"
@@ -117,7 +123,7 @@ def test_algo_name_defaults_to_the_on_policy_family(clean_registry):
 
 
 def test_algo_name_refuses_an_unknown_family(clean_registry):
-  t = _reg("t_family_bad", mode=AVOID, margin_fn=_margins)
+  t = _reg("t_family_bad", mode=AVOID, margin_fn=_m(AVOID))
   with pytest.raises(ValueError, match="unknown family"):
     algo_name(t, family="model_based")
 
@@ -137,7 +143,7 @@ def test_algo_name_refuses_two_player_cumulative(clean_registry):
 
 
 def test_algo_name_refuses_an_adversary_the_task_does_not_define(clean_registry):
-  t = _reg("t_no_adv", mode=AVOID, margin_fn=_margins)
+  t = _reg("t_no_adv", mode=AVOID, margin_fn=_m(AVOID))
   with pytest.raises(ValueError, match="does not define an adversary"):
     algo_name(t, adversary=True)
 
@@ -146,6 +152,30 @@ def test_algo_name_refuses_reach_avoid_on_avoid_only_margins(clean_registry):
   t = _reg("t_no_target", mode=REACH_AVOID, margin_fn=_avoid_only_margins)
   with pytest.raises(ValueError, match="AVOID-ONLY"):
     algo_name(t)
+
+
+def test_avoid_only_task_declares_only_an_avoid_margin(clean_registry):
+  """mode=AVOID refuses a margin_fn that carries a reach margin (explicitly, or
+  untagged), at registration; compose(g) and avoid_only(...) are accepted."""
+  from robot_safety_sandbox.margins import avoid_only, compose
+  g = lambda env: None  # noqa: E731  never called
+  l = lambda env: None  # noqa: E731
+  for bad in (compose(g, l), _margins):
+    with pytest.raises(ValueError, match="avoid only"):
+      TaskSpec(task_id="t_avoid_bad", cfg_builder=_cfg_builder, mode=AVOID,
+               margin_fn=bad)
+  for ok in (compose(g), avoid_only(compose(g, l))):
+    TaskSpec(task_id="t_avoid_ok", cfg_builder=_cfg_builder, mode=AVOID,
+             margin_fn=ok)
+
+
+def test_compose_records_the_declared_margins():
+  from robot_safety_sandbox.margins import compose
+  g = lambda env: None  # noqa: E731
+  l = lambda env: None  # noqa: E731
+  ra, av = compose(g, l), compose(g)
+  assert (ra.avoid_margin, ra.reach_margin, ra.has_target) == (g, l, True)
+  assert (av.avoid_margin, av.reach_margin, av.has_target) == (g, None, False)
 
 
 # --- margin_fn requirement ----------------------------------------------------
@@ -178,7 +208,7 @@ def test_bridges_build_dense_iff_cumulative(clean_registry, monkeypatch,
 
   monkeypatch.setattr(base, attr, _stub)
   t = _reg(f"t_dense_{mode}_{attr}", mode=mode,
-           margin_fn=None if mode == CUMULATIVE else _margins)
+           margin_fn=None if mode == CUMULATIVE else _m(mode))
   assert maker(t, 4, "cpu") == "env"
   assert seen["dense_reward"] is dense
 
@@ -189,7 +219,7 @@ def test_explicit_dense_reward_still_wins(clean_registry, monkeypatch):
   seen = {}
   monkeypatch.setattr(base, "MjlabTensorSafetyEnv",
                       lambda *a, **kw: seen.update(kw) or "env")
-  t = _reg("t_dense_override", mode=AVOID, margin_fn=_margins)
+  t = _reg("t_dense_override", mode=AVOID, margin_fn=_m(AVOID))
   make_tensor(t, 4, "cpu", dense_reward=True)
   assert seen["dense_reward"] is True
 
@@ -198,7 +228,7 @@ def test_explicit_dense_reward_still_wins(clean_registry, monkeypatch):
 
 def test_list_tasks_filters_by_mode(clean_registry):
   registry._REGISTRY.clear()
-  _reg("t_a", mode=AVOID, margin_fn=_margins)
+  _reg("t_a", mode=AVOID, margin_fn=_m(AVOID))
   _reg("t_c", mode=CUMULATIVE)
   assert list_tasks() == ["t_a", "t_c"]
   assert list_tasks(CUMULATIVE) == ["t_c"]

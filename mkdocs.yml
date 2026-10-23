@@ -90,6 +90,8 @@ nav:
       - Digit stabilize: environments/digit.md
   - Tutorials:
       - Build the car-goal task: tutorial-car-goal.md
+  - Experiments:
+      - G1 recovery from LAFAN motions: experiments/g1-lafan-recovery.md
   - Concepts:
       - Safety and reach-avoid margins: concepts/margins.md
       - The MAP naming convention: concepts/map.md

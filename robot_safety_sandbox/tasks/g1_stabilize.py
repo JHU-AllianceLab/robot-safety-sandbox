@@ -26,6 +26,7 @@ G1 specifics vs the Go2 defaults:
 
 from __future__ import annotations
 
+from ..margins import compose
 from ..registry import REACH_AVOID, TaskSpec, register
 
 #: Bridge kwargs shared by every G1 task — see the module docstring.
@@ -40,21 +41,26 @@ G1_CTRL_DIM = 29
 
 def register_all() -> None:
   from robot_safety_sandbox.envs.g1_stabilize.env_cfg import (
+    g_fall,
     g1_locomote_env_cfg,
     g1_stabilize_env_cfg,
-    locomote_margins,
-    stance_margins,
+    l_stance,
+    l_track,
   )
+  # REACH-AVOID.  avoid margin: g_fall (don't fall)
+  #               reach margin: l_stance (the stance band)
   register(TaskSpec(
     task_id="g1_stabilize", cfg_builder=g1_stabilize_env_cfg,
-    margin_fn=stance_margins, mode=REACH_AVOID,
+    margin_fn=compose(g_fall, l_stance), mode=REACH_AVOID,
     ctrl_dim=G1_CTRL_DIM, supports_adversary=True,
     kwargs=dict(G1_BRIDGE_KWARGS),
     description="Flat ground, zero command: return to a stable stand despite "
                 "an adversarial torso force (the humanoid go2_stabilize)."))
+  # REACH-AVOID.  avoid margin: g_fall (don't fall)
+  #               reach margin: l_track (walk at the command)
   register(TaskSpec(
     task_id="g1_locomote", cfg_builder=g1_locomote_env_cfg,
-    margin_fn=locomote_margins, mode=REACH_AVOID,
+    margin_fn=compose(g_fall, l_track), mode=REACH_AVOID,
     ctrl_dim=G1_CTRL_DIM, supports_adversary=True,
     kwargs=dict(G1_BRIDGE_KWARGS),
     description="Flat ground, constant forward command: keep walking at it "

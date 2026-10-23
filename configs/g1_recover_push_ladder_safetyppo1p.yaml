@@ -1,0 +1,92 @@
+# SafetyPPO1P on g1_recover_push with MULTI-GAMMA critic heads (the gamma
+# ladder): M=Safety (avoid-only), A=PPO, P=1P. The fallback for the G1 walker
+# under RANDOM PUSHES: episodes open on g1_recover's start-state bank (the
+# walker mid-gait, just pushed, a moment before it fell, synthetic tilts, the
+# stance) and a scripted push hits torso_link every 2-4 s for 0.2 s in a random
+# horizontal direction, at force_max(t) x the per-env survival scale. The ramp
+# takes the push from 0 N to 200 N over the first half of the run.
+#
+#   python examples/train.py --config configs/g1_recover_push_ladder_safetyppo1p.yaml \
+#       --out runs/g1_recover_push_ladder
+#
+# THE LADDER. Four critic heads at gammas 0.9 / 0.99 / 0.995 / 0.999 (tau* under
+# the tilt termination, fail_ratio 1.84: ~6 / 61 / 122 / 609 steps at 50 Hz; the
+# 0.999 head sees past the 400-step episode, i.e. it is the near-undiscounted
+# certificate head), all trained on every sample. Each episode's actor
+# advantage comes from the head of its REGIME = spawn source (5) x push bucket
+# (4, the per-env force scale in quarters of [0, 1]) = 20 regimes;
+# GammaLadderCallback re-assigns a regime every 50 rollouts to the shortest
+# head whose tau* covers 1.5 x the 90th percentile of its time-to-fall, one
+# rung at a time. Every regime starts on 0.999 (head_init -1), the sign-safe
+# end. Watch ladder/head_r<r> and ladder/T_r<r> (r = source*4 + bucket, sources
+# nominal, clean, pushed, fell, synthetic), train/explained_variance_h<k>,
+# train/head_frac_h<k>, train/gamma (sample-weighted mean discount).
+#
+# THE BASELINE is configs/g1_recover_push_anneal_safetyppo1p.yaml: identical,
+# but one critic with the usual anneal 0.99 -> 0.999 (20%) -> 0.9999 (40%).
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_recover_push
+num_envs: 4096
+steps: 1000000000
+seed: 0
+
+# WARM START from the regularized all-joint recover run (same 29-wide head, same
+# obs, same avoid backup): the actor transfers whole, the one-head critic is
+# tiled into the four heads, and the actor is held for the first 20M steps
+# while the heads refit at their own discounts (critic_warmup_steps). The
+# trainer needs the run's tensornormalize.pt beside the checkpoint (it is there).
+load: runs/g1_recover_reg/g1_recover/final_model.zip
+critic_warmup_steps: 20000000
+
+# The spawn's knobs, as the warm-start run (envs/g1_recover/env_cfg.py).
+env_overrides:
+  dataset: null          # null -> data/g1_recover_states.pt or $SAFE_ZOO_G1_RECOVER_DATASET
+  weights: {nominal: 0.15, clean: 0.35, pushed: 0.15, fell: 0.20, synthetic: 0.15}
+  levels: 5
+  band_width: 0.4
+  init_level: 0
+  episode_length_s: 8.0
+
+# --- the random-push curriculum ----------------------------------------------
+# Global ramp 0 N -> force_max over force_ramp_frac of the run (ForceRampCallback,
+# force_start 0), times a per-env survival scale that moves +0.05 on a survived
+# episode and -0.05 on a fall, clamped to [force_floor, 1]
+# (PerEnvForceScaleCallback). A push is an IMPULSE (0.2 s): 200 N x 0.2 s on the
+# 33 kg G1 is ~1.2 m/s of base velocity, the harvest's --max-push-v range.
+# game/force_scale_at_floor near 1.0 = losing even at the floor -> lower
+# force_max; game/force_scale_mean near 1.0 = the pushes never bite -> raise it.
+force_max: 200.0
+force_start: 0.0
+force_ramp_frac: 0.5
+force_init: 0.5
+force_floor: 0.3
+
+# --- multi-gamma critic heads ------------------------------------------------
+gammas: [0.9, 0.99, 0.995, 0.999]
+head_init: -1            # every regime starts on the longest horizon (0.999)
+gamma_anneal: false      # the ladder holds every horizon at once; nothing to anneal
+ladder_update_every: 50
+ladder_kappa: 1.5
+ladder_fail_ratio: 1.84  # (c - f)/c for the tilt termination (c ~ 1, f ~ -0.84)
+ladder_quantile: 0.9
+ladder_min_falls: 20
+ladder_hysteresis: 0.25
+
+# --- safety-PPO recipe (as the warm-start run) --------------------------------
+lr: 1.0e-4
+adaptive_lr: false
+target_kl: 0.01
+ent_coef: 1.0e-3
+max_std: 0.4
+net: "512,256,128"       # keep equal to the run you load from
+
+# --- action penalties on the PPO loss (as the warm-start run) -----------------
+action_rate_coef: 0.05
+action_mag_coef: 0.005
+
+# --- video (see configs/g1_recover_safetyppo1p.yaml for the GL note) ---------
+# The clip env pushes too (the same task), at the ramp's current force_max.
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

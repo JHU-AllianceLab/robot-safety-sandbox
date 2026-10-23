@@ -10,8 +10,8 @@ Reach-avoid-stay is split into two avoid/reach-avoid problems and two policies,
 switched at deploy time (``filters/switch.py``):
 
   STAY   ``g1_waist_stay_arm_random``, mode="safety" (avoid). The constraint is
-         "safe AND inside the goal set": h = min(g, floor(l_box)), no reach
-         target. V_stay > 0 == the stay policy can keep the robot upright and
+         "safe AND inside the goal set": h = min(g, soft_tail(l_box)), no
+         reach target. V_stay > 0 == the stay policy can keep the robot upright and
          inside the goal set from here. Spawns ON the goal: the waist placed
          within ``spawn_waist_noise`` of this episode's target, the base moving
          at up to ``spawn_vel_noise`` (half the tolerances, so a spawn is inside
@@ -39,27 +39,43 @@ the edge of the goal set",
 with the velocities the pelvis's, in its body frame. The three velocity terms
 are the three the twist command can set; vz, wx and wy are not part of the goal.
 
-WHY THE STAY CONSTRAINT FLOORS l_box. The avoid value is the worst h along the
-trajectory, and a fall ENDS the trajectory. With h = min(g, l_box) raw, a fall
-cost about -0.84 (g's tilt term when ``fell_over`` fires at 70 deg) while
+WHY THE STAY CONSTRAINT COMPRESSES l_box. The avoid value is the worst h along
+the trajectory, and a fall ENDS the trajectory. With h = min(g, l_box) raw, a
+fall cost about -0.84 (g's tilt term when ``fell_over`` fires at 70 deg) while
 staying up and drifting more than 0.185 out of the box anywhere in the episode
 cost more, down to -CLAMP. Falling early was the optimum, and the first stay
 run learned exactly that: every episode fell within ~0.5 s, goal or no goal.
 So the stay constraint ranks the two:
-  * l_box is soft-floored at -L_FLOOR (identity for l_box >= 0, L tanh(l/L)
-    below): the goal set, and so V_stay's zero level set, is unchanged, and the
-    margin near the box's edge keeps its full slope; only a large violation
-    saturates. Any upright state now scores above a robot tilting past ~62 deg.
   * a failure termination is valued at -CLAMP (``stay_margins.terminal_margin``,
     read by ``base.safety_margin_hook``) instead of the zoo-wide -0.1 anchor,
     which an ``illegal_contact`` touchdown, where g is barely negative, would
-    otherwise turn into a cheap way out.
+    otherwise turn into a cheap way out;
+  * l_box is compressed below zero, L asinh(l/L) (identity for l_box >= 0): the
+    goal set, and so V_stay's zero level set, is unchanged and the margin near
+    the box's edge keeps its full slope, but an upright robot stays well above
+    -CLAMP (-1.75 with the waist at the far stop from its goal) while a large
+    violation still scores worse than a small one. A FLAT tail (L tanh(l/L),
+    the second run) removed that last part: with every far-off waist angle
+    scoring the same, the policy parked both waist joints at one stop whatever
+    the goal.
+
+WHY THE WAIST IS STIFFER. The upper body is ~15 kg of the robot's 33; with the
+pelvis level, gravity's torque at waist roll and pitch grows ~20 Nm per rad of
+lean, which cancelled ~70% of mjlab's stock waist stiffness (28.5 Nm/rad): a
+target of +-0.17 rad already put roll on its +-0.52 stop, so ~80% of the action
+range only pressed a joint into its stop. The waist roll/pitch PD here is
+``WAIST_GAIN_MULT`` x stock (kp and kd both, which keeps the damping ratio on the
+real torso inertia about what it was), and their action scale is
+``WAIST_ACTION_SCALE`` rad per unit, so +-3 spans the targets that hold the whole
+joint range. Applied to both tasks: the reach and stay twins share one robot.
 
 The arms swing at random (the g1_stabilize_arm_random generator) at a lower
 magnitude than the arm-random stands: see ``tasks/g1_waist.py``.
 """
 
 from __future__ import annotations
+
+import dataclasses
 
 import torch
 
@@ -71,7 +87,8 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from robot_safety_sandbox.envs.g1_stabilize.env_cfg import (
   CLAMP, _g_fall, g1_stabilize_env_cfg)
-from robot_safety_sandbox.envs.g1_waist.command import WaistTargetCommandCfg
+from robot_safety_sandbox.envs.g1_waist.command import (
+  WAIST_JOINTS, WaistTargetCommandCfg)
 from robot_safety_sandbox.envs.g1_waist.stance import reset_leg_stance
 from robot_safety_sandbox.envs.g1_waist.stay_value import StayValue, stay_value
 from robot_safety_sandbox.margins import avoid_only
@@ -94,10 +111,13 @@ SPAWN_VEL_NOISE = 0.05
 #: Stay spawn default: the leg-stance distribution's scale (``stance.py``;
 #: 0 = every episode on the stock knees-bent stance).
 SPAWN_STANCE_SCALE = 1.0
-#: Soft floor on the stay constraint's l_box (see the module docstring). Below
-#: |g| at the ``fell_over`` termination (~0.84), so a fall outranks any box
-#: violation even before the terminal anchor.
-L_FLOOR = 0.5
+#: Scale of the stay constraint's compressed tail (see the module docstring):
+#: l_box below zero becomes L_TAIL * asinh(l_box / L_TAIL).
+L_TAIL = 0.5
+#: Waist roll/pitch PD gains as a multiple of mjlab's G1 defaults, and their
+#: action scale in rad per unit action (stock: 0.4386). See the module docstring.
+WAIST_GAIN_MULT = 3.0
+WAIST_ACTION_SCALE = 0.2
 
 
 def target_margin(env, q_tol: float = Q_TOL, v_tol: float = V_TOL) -> torch.Tensor:
@@ -114,21 +134,22 @@ def target_margin(env, q_tol: float = Q_TOL, v_tol: float = V_TOL) -> torch.Tens
                    dim=1).amin(dim=1)
 
 
-def soft_floor(l: torch.Tensor, floor: float = L_FLOOR) -> torch.Tensor:
-  """l where l >= 0; floor * tanh(l / floor) below. Same sign, value, slope and
-  curvature at 0; tends to -floor as l -> -inf."""
-  return torch.where(l >= 0, l, floor * torch.tanh(l / floor))
+def soft_tail(l: torch.Tensor, scale: float = L_TAIL) -> torch.Tensor:
+  """l where l >= 0; scale * asinh(l / scale) below. Same sign, value, slope
+  and curvature at 0; below, still strictly increasing but only logarithmically
+  (slope 0.12 at l = -4), so a large violation stays well above -CLAMP."""
+  return torch.where(l >= 0, l, scale * torch.asinh(l / scale))
 
 
 def _stay_constraint(env):
-  """(h, l_box) with h = min(g, soft_floor(l_box)): safe AND inside the goal
-  set, any fall ranked below any box violation."""
+  """(h, l_box) with h = min(g, soft_tail(l_box)): safe AND inside the goal
+  set."""
   l_box = target_margin(env)
-  h = torch.minimum(_g_fall(env), soft_floor(l_box))
+  h = torch.minimum(_g_fall(env), soft_tail(l_box))
   return h.clamp(-CLAMP, CLAMP), l_box.clamp(-CLAMP, CLAMP)
 
 
-#: The STAY margins: (min(g, soft_floor(l_box)), 0), avoid-only. A failure
+#: The STAY margins: (min(g, soft_tail(l_box)), 0), avoid-only. A failure
 #: termination is valued at -CLAMP, the bottom of h's range.
 stay_margins = avoid_only(_stay_constraint)
 stay_margins.terminal_margin = -CLAMP
@@ -159,11 +180,33 @@ def reset_waist_near_target(env, env_ids, noise: float = SPAWN_WAIST_NOISE,
   robot.write_joint_position_to_sim(q, joint_ids=jid, env_ids=env_ids)
 
 
+def _stiffen_waist(cfg, gain_mult: float, action_scale: float) -> None:
+  """Waist roll/pitch: PD gains x ``gain_mult``, action scale ``action_scale``.
+  The articulation and the scale dict are mjlab module-level objects shared by
+  every G1 task, so both are REPLACED here, never mutated."""
+  robot = cfg.scene.entities["robot"]
+  acts, hit = [], 0
+  for a in robot.articulation.actuators:
+    if set(a.target_names_expr) == set(WAIST_JOINTS):
+      a = dataclasses.replace(a, stiffness=a.stiffness * gain_mult,
+                              damping=a.damping * gain_mult)
+      hit += 1
+    acts.append(a)
+  if hit != 1:
+    raise RuntimeError("expected one G1 actuator cfg for exactly the waist roll "
+                       f"and pitch joints, found {hit}")
+  robot.articulation = dataclasses.replace(robot.articulation,
+                                           actuators=tuple(acts))
+  action = cfg.actions["joint_pos"]
+  action.scale = {**action.scale, **{j: float(action_scale) for j in WAIST_JOINTS}}
+
+
 def _waist_env_cfg(play: bool, episode_length_s: float | None) -> ManagerBasedRlEnvCfg:
   """g1_stabilize (flat, twist pinned to zero) + the waist goal command and the
   two observation terms the goal needs. Both appended at the END of the actor
   group, after g1_stabilize's terms, so its column order is unchanged."""
   cfg = g1_stabilize_env_cfg(play=play)
+  _stiffen_waist(cfg, WAIST_GAIN_MULT, WAIST_ACTION_SCALE)
   if episode_length_s is not None and not play:
     cfg.episode_length_s = float(episode_length_s)
   cfg.commands[COMMAND] = WaistTargetCommandCfg()

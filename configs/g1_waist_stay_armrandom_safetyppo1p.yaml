@@ -1,11 +1,15 @@
 # SafetyPPO1P on g1_waist_stay_arm_random: the STAY half of G1 reach-avoid-stay.
-# Avoid on h = min(g, soft_floor(l_box)): keep the robot upright (g1_stabilize's
+# Avoid on h = min(g, soft_tail(l_box)): keep the robot upright (g1_stabilize's
 # fall margin) AND inside the goal set -- waist roll/pitch within 0.1 rad of the
 # episode's target, body-frame vx, vy, wz within 0.1 of the (zero) twist
-# command. l_box is soft-floored at -0.5 and a fall is valued at -3, so a fall
-# always scores below a box violation (without that, the first run learned to
-# fall on purpose). Spawns on the goal. The actor owns legs + waist (dims 0..14); the
-# arms (15..28) swing at random. See envs/g1_waist/env_cfg.py.
+# command. A fall is valued at -3 and l_box below zero is compressed to
+# 0.5*asinh(l/0.5), so a fall always scores below a box violation (without
+# that, the first run learned to fall on purpose) while a bigger violation still
+# scores worse than a smaller one (a flat tanh floor, the second run, let the
+# policy park the waist at one stop whatever the goal). Waist roll/pitch PD at
+# 3x mjlab's gains, action scale 0.2 rad/unit. Spawns on the goal, legs in a
+# random stance. The actor owns legs + waist (dims 0..14); the arms (15..28)
+# swing at random. See envs/g1_waist/env_cfg.py.
 #
 #   python examples/train.py --config configs/g1_waist_stay_armrandom_safetyppo1p.yaml
 #
@@ -55,8 +59,8 @@ net: "512,256,128"
 
 # Action-rate penalty on the PPO loss, as the recover configs. NO magnitude
 # penalty: it pulls the action toward the default pose, and holding a 0.4 rad
-# waist goal against gravity takes a waist action of ~2 (the waist's position
-# gain leaves ~0.5 rad of steady-state error at that lean).
+# waist goal takes a waist action of ~1.5 (target ~0.3 rad at 0.2 rad/unit;
+# gravity carries the rest of the lean).
 action_rate_coef: 0.05
 action_mag_coef: 0.0
 
