@@ -1,0 +1,72 @@
+# SafetySHAC1P vs SafetyPPO1P, apples to apples -- the SHAC arm.
+# M=Safety (avoid-only), A=SHAC (BPTT through a learned world model), P=1P.
+# Twin of g1_recover_selfhandover_safetyppo1p.yaml: read that header for the
+# question, the start-state bank and what the two arms share.
+#
+#   python examples/train.py --config configs/g1_recover_selfhandover_safetyshac1p.yaml \
+#       --seed 0 --out runs/shac_vs_ppo/shac_s0
+#   (the whole experiment: examples/run_jobs.sh configs/sweeps/shac_vs_ppo/jobs.txt)
+#
+# FROM SCRATCH: no warm start. The first wm_warmup_iters iterations fit only the
+# world model (on the random initial actor's data), then actor_delay_iters fit
+# the critic too, then the actor. Those env steps count toward the 250M like
+# every other. Iterations: 250M / (4096 envs x 2.5 vector steps per iteration at
+# utd_ratio 0.4) = 24.4k, so the LR cosine runs over the whole run
+# (lr_decay_iters) instead of the 250k-iteration default that would barely
+# decay here.
+#
+# BUDGET (RTX 5080, 4096 envs): ~31k env-steps/s with TF32 (26.6k without), so
+# ~2.2 h per 250M-step seed; PPO runs ~80k/s.
+family: model_based      # SHAC family -- the train.py router reads this
+task: g1_recover
+num_envs: 4096
+steps: 250000000
+seed: 0
+
+# --- SHARED with the PPO arm (verbatim) ----------------------------------------
+env_overrides:
+  dataset: data/g1_self_handover_train.pt
+  weights: {handover: 1.0, nominal: 0.0, clean: 0.0, pushed: 0.0, fell: 0.0,
+            synthetic: 0.0, mocap: 0.0}
+  sampler: uniform       # handover rows drawn uniformly; no level curriculum
+  episode_length_s: 3.0
+  rest_terminate: true
+  rest_dwell_s: 0.4
+  rest_arm_s: 0.8
+
+privileged_critic: true  # the world-model state AND the critic's input
+gamma: 0.99
+gamma_anneal: false
+net: "512,256,128"
+action_rate_coef: 0.05   # value units here (see the PPO arm's header)
+action_mag_coef: 0.005
+
+# --- SHAC recipe (SuperMimic's values unless noted) ---------------------------
+lr: 2.0e-4
+lr_decay_iters: 24400    # = the run's iterations (header)
+lr_min_frac: 0.03
+wm_warmup_iters: 1000    # ~10M env steps of model-only fitting first (the model
+                         # reached its plateau error by ~350 iterations on G1)
+actor_delay_iters: 200   # ~2M more: the critic's first fit before the actor moves
+horizon: 32
+imagine_batch: 4096
+action_noise_std: 0.1
+softmin_tau: 0.0
+wm_net: "1024,1024,1024" # paper 3x2048; 16 GB shared with mjlab
+wm_head_net: "256,256"
+wm_window: 8
+wm_batch: 2048
+wm_gradient_steps: 10
+critic_epochs: 5
+critic_minibatches: 4
+utd_ratio: 0.4
+learning_starts: 64
+replay_size: 500         # paper 1000 per env; ~1.1 GiB at 4096 envs
+tf32: true               # the paper's precision; 1.18x faster here
+
+log_interval: 50
+checkpoint_every: 25000000
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

@@ -59,7 +59,11 @@ printed and written to ``<out stem>.report.json``: overall survival, the
 episode AUC of V (P(V of a surviving episode > V of a falling one), ties
 half), the row Spearman of value0 vs p_surv, survival and AUC per category,
 the shares of rows with p_surv in [0, 0.1], (0.1, 0.9) and [0.9, 1], survival
-by push force, and the E2 decision line.
+by push force, and the E2 decision line. Also the value read as a certificate
+(``cert_frac``, ``cert_precision`` = P(survive | V(s0) >= 0), ``cert_recall`` =
+P(V(s0) >= 0 | survive)) and the policy's action statistics over every
+rollout step (``action_rate`` ||a_t - a_{t-1}||^2, ``action_mag`` ||a_t||^2,
+``action_sat_frac``), for comparing differently regularized learners.
 """
 
 from __future__ import annotations
@@ -198,6 +202,13 @@ def rollouts(env, model, norm, value, target: torch.Tensor, kinds: torch.Tensor,
   crit = env.critic_obs() if value.asymmetric else None
   v0 = value(obs, crit)
   elapsed = torch.zeros(n, dtype=torch.long, device=dev)
+  # What the deterministic policy's actions look like (a smoothness read-out to
+  # compare policies trained with different regularizers): the action rate
+  # ||a_t - a_{t-1}||^2 (the first step of an episode has no own predecessor
+  # and is left out), the magnitude ||a_t||^2 (summed over action dims), and
+  # the fraction of action dims at the box. Every step of every env counts.
+  prev_act = torch.zeros(n, int(low.numel()), device=dev)
+  a_stats = torch.zeros(6, device=dev)  # rate sum, n, mag sum, n, sat sum, n
   ep: dict[str, list] = {"row": [], "value0": [], "fell": [], "ttf": [], "force": []}
   n_target = int(target.sum())
   remaining = n_target
@@ -206,6 +217,14 @@ def rollouts(env, model, norm, value, target: torch.Tensor, kinds: torch.Tensor,
   while remaining > 0:
     with torch.no_grad():
       act = torch.clamp(model.policy._predict(norm(obs), deterministic=True), low, high)
+    has_prev = (elapsed > 0).float()
+    a_stats[0] += ((act - prev_act).pow(2).sum(-1) * has_prev).sum()
+    a_stats[1] += has_prev.sum()
+    a_stats[2] += act.pow(2).sum(-1).sum()
+    a_stats[3] += n
+    a_stats[4] += ((act >= high - 1e-4) | (act <= low + 1e-4)).float().mean(-1).sum()
+    a_stats[5] += n
+    prev_act = act
     cursor = int(mj._zoo_spawn_cursor)
     obs, _g, dones, timeouts, _l = env.step_tensor(act)
     elapsed += 1
@@ -258,7 +277,9 @@ def rollouts(env, model, norm, value, target: torch.Tensor, kinds: torch.Tensor,
   el = max(time.time() - t0, 1e-6)
   print(f"[label] done: {episodes} episodes in {it} steps, {el:.0f}s "
         f"({episodes / el:.0f} ep/s, {it * n / el:.0f} env-steps/s)")
-  return {key: torch.cat(v) for key, v in ep.items()}
+  out = {key: torch.cat(v) for key, v in ep.items()}
+  out["action_stats"] = a_stats.cpu()
+  return out
 
 
 def write_labels(bank: dict, ep: dict, target: torch.Tensor) -> tuple[float, float]:
@@ -302,6 +323,20 @@ def report(bank: dict, ep: dict, target: torch.Tensor, ab: tuple, args) -> dict:
   out["frac_p_le_0.1"] = float((p <= 0.1).float().mean()) if p.numel() else float("nan")
   out["frac_p_mid"] = float(((p > 0.1) & (p < 0.9)).float().mean()) if p.numel() else float("nan")
   out["frac_p_ge_0.9"] = float((p >= 0.9).float().mean()) if p.numel() else float("nan")
+  # The value as a CERTIFICATE ("safe iff V >= 0"), per episode, at its start:
+  # how much it certifies, and how often a certified start then fell.
+  cert, surv = v0 >= 0.0, ~fell
+  n_cert, n_surv = int(cert.sum()), int(surv.sum())
+  out["cert_frac"] = float(cert.float().mean()) if row.numel() else float("nan")
+  out["cert_precision"] = (float((cert & surv).sum()) / n_cert if n_cert
+                           else float("nan"))
+  out["cert_recall"] = (float((cert & surv).sum()) / n_surv if n_surv
+                        else float("nan"))
+  st = ep.get("action_stats")
+  if st is not None:
+    out["action_rate"] = float(st[0] / st[1].clamp_min(1.0))
+    out["action_mag"] = float(st[2] / st[3].clamp_min(1.0))
+    out["action_sat_frac"] = float(st[4] / st[5].clamp_min(1.0))
   print(f"[label] {out['rows_labeled']} rows x {args.k} = {out['episodes']} episodes; "
         f"survival {out['survival']:.3f}")
   print(f"[label] value vs outcome: episode AUC {out['auc_value_episodes']:.3f} "
@@ -310,6 +345,13 @@ def report(bank: dict, ep: dict, target: torch.Tensor, ab: tuple, args) -> dict:
         f"+ {ab[1]:.3f})")
   print(f"[label] rows by p_surv: [0, 0.1] {out['frac_p_le_0.1']:.3f}, (0.1, 0.9) "
         f"{out['frac_p_mid']:.3f}, [0.9, 1] {out['frac_p_ge_0.9']:.3f}")
+  print(f"[label] certificate V(s0) >= 0: certifies {out['cert_frac']:.3f} of starts, "
+        f"precision P(survive | V>=0) {out['cert_precision']:.3f}, recall "
+        f"P(V>=0 | survive) {out['cert_recall']:.3f}")
+  if "action_rate" in out:
+    print(f"[label] actions: rate {out['action_rate']:.4f}, magnitude "
+          f"{out['action_mag']:.3f} (sum over dims), at the box "
+          f"{out['action_sat_frac']:.4f} of dims")
   # per category (the row's own file resolves the name)
   names = row_names(bank, fallback=KIND_NAMES)
   uniq = sorted(set(names))
