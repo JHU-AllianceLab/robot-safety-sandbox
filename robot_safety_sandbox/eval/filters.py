@@ -122,6 +122,13 @@ class FilterBundle:
 
 
 def _need(mods: dict, key: str, kind: str):
+  if key == "value_fn" and key not in mods and mods.get("asymmetric_critic"):
+    raise SystemExit(
+      f"--filter {kind} needs the twin's value V(s), but {mods.get('twin')} has a "
+      "PRIVILEGED critic: it reads the env's 'critic' obs group, which the eval "
+      "loop does not pass to the filters (only the actor obs). Use a filter that "
+      "needs only the fallback (e.g. --filter rollout), or a twin trained "
+      "without --privileged-critic.")
   if key not in mods:
     raise SystemExit(
       f"--filter {kind} needs '{key}', which the twin ({mods.get('twin')}) "

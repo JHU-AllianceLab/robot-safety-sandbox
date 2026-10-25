@@ -79,7 +79,13 @@ SAFETY_MODES = (AVOID, REACH_AVOID)
 _PREFIX = {AVOID: "Safety", REACH_AVOID: "ReachAvoid", CUMULATIVE: ""}
 #: MAP letter **A** — trainer family -> the algorithm it runs. The A slot also
 #: has A2C / DQN in principle; neither is wired to a trainer in this zoo yet.
-_ALG = {"on_policy": "PPO", "off_policy": "SAC"}
+#: ``model_based`` is SHAC through a learned world model (safety_sb3.shac): it
+#: has no two-player cell, and its cumulative cell is a safety_sb3 learner too.
+_ALG = {"on_policy": "PPO", "off_policy": "SAC", "model_based": "SHAC"}
+#: families with a two-player learner (the P axis), and with a STOCK
+#: stable_baselines3 learner for mode=CUMULATIVE
+_TWO_PLAYER_FAMILIES = ("on_policy", "off_policy")
+_STOCK_SB3_FAMILIES = ("on_policy", "off_policy")
 #: the trainer families (``examples/train.py --family``)
 FAMILIES = tuple(_ALG)
 
@@ -192,11 +198,13 @@ def algo_name(task_id: str, adversary: bool = False,
   mode=CUMULATIVE returns the bare algorithm (``"PPO"`` / ``"SAC"``): the
   plain-RL task policy trains with STOCK stable_baselines3, which keeps the
   checkpoint a vanilla SB3 zip. It has no P axis — there is no two-player
-  cumulative game.
+  cumulative game. The ``model_based`` family has no stock counterpart, so its
+  cumulative cell is the safety_sb3 learner ``CumulativeSHAC1P``.
 
-  Two pairings are refused rather than resolved:
+  Three pairings are refused rather than resolved:
 
   * a two-player CUMULATIVE run — no such game exists;
+  * a two-player ``model_based`` run — SHAC has single-player cells only;
   * a reach-avoid learner on an avoid-only task (no target set). Pinning l to a
     constant does NOT make the reach-avoid backup compute the avoid value — a
     negative l empties the safe set, a non-negative one strips the lookahead —
@@ -211,6 +219,9 @@ def algo_name(task_id: str, adversary: bool = False,
   if adversary and s.mode == CUMULATIVE:
     raise ValueError(f"task '{task_id}' is mode={CUMULATIVE!r}: there is no "
                      f"two-player cumulative learner")
+  if adversary and family not in _TWO_PLAYER_FAMILIES:
+    raise ValueError(f"family={family!r} ({_ALG[family]}) has no two-player "
+                     f"learner; drop --adversary")
   # margin_fns built by margins.compose/avoid_only carry has_target; anything
   # else (task-local margin builders) is assumed to declare a real l.
   if s.mode == REACH_AVOID and not getattr(s.margin_fn, "has_target", True):
@@ -221,7 +232,9 @@ def algo_name(task_id: str, adversary: bool = False,
       f"two-player Safety{_ALG[family]}2P), or give the task a real reach "
       f"margin l. See margins.py.")
   if s.mode == CUMULATIVE:
-    return _ALG[family]                      # stock stable_baselines3, 1 player
+    if family in _STOCK_SB3_FAMILIES:
+      return _ALG[family]                    # stock stable_baselines3, 1 player
+    return f"Cumulative{_ALG[family]}1P"     # no stock SB3 twin: safety_sb3
   return f"{_PREFIX[s.mode]}{_ALG[family]}{'2P' if adversary else '1P'}"
 
 

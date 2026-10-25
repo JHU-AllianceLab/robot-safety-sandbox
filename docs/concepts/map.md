@@ -3,7 +3,7 @@
 > **Here's a MAP to navigate the codebase — Mode. Algorithm. Players.**
 
     M = Mode       Safety | ReachAvoid | Cumulative    the Bellman operator
-    A = Algorithm  PPO | SAC | A2C | DQN               the RL update rule
+    A = Algorithm  PPO | SAC | SHAC | A2C | DQN        the RL update rule
     P = Players    1P | 2P                             single-player | zero-sum
 
 Every learner's name is those three letters concatenated in that order —
@@ -12,7 +12,7 @@ Every learner's name is those three letters concatenated in that order —
 | letter | source | how it is set |
 |---|---|---|
 | **M** | the TASK | `TaskSpec(mode=...)` — a property of its margins |
-| **A** | the RUN | `train.py --family on_policy` (PPO) / `off_policy` (SAC) |
+| **A** | the RUN | `train.py --family on_policy` (PPO) / `off_policy` (SAC) / `model_based` (SHAC) |
 | **P** | the RUN | `--adversary` |
 
 You never pick a learner directly. `algo_name(task_id, adversary, family)` is a
@@ -24,14 +24,17 @@ f"{_PREFIX[spec(task_id).mode]}{_ALG[family]}{'2P' if adversary else '1P'}"
 
 so nothing in the registry can override it:
 
-| task `mode` | `family="on_policy"` 1P / 2P | `family="off_policy"` 1P / 2P |
-|---|---|---|
-| `"safety"` (avoid) | `SafetyPPO1P` / `SafetyPPO2P` | `SafetySAC1P` / `SafetySAC2P` |
-| `"reach-avoid"` | `ReachAvoidPPO1P` / `ReachAvoidPPO2P` | `ReachAvoidSAC1P` / `ReachAvoidSAC2P` |
-| `"cumulative"` | `PPO` (stock SB3) / — | `SAC` (see note) / — |
+| task `mode` | `family="on_policy"` 1P / 2P | `family="off_policy"` 1P / 2P | `family="model_based"` 1P / 2P |
+|---|---|---|---|
+| `"safety"` (avoid) | `SafetyPPO1P` / `SafetyPPO2P` | `SafetySAC1P` / `SafetySAC2P` | `SafetySHAC1P` / — |
+| `"reach-avoid"` | `ReachAvoidPPO1P` / `ReachAvoidPPO2P` | `ReachAvoidSAC1P` / `ReachAvoidSAC2P` | `ReachAvoidSHAC1P` / — |
+| `"cumulative"` | `PPO` (stock SB3) / — | `SAC` (see note) / — | `CumulativeSHAC1P` / — |
 
 Cumulative has no **P**: there is no two-player cumulative game, and `algo_name`
-raises rather than inventing one.
+raises rather than inventing one. Neither does `model_based`: SHAC has
+single-player cells only, so `--adversary` is refused there too. And because there
+is no stock SB3 SHAC, its cumulative cell is the full safety_sb3 name
+`CumulativeSHAC1P`, not a bare algorithm.
 
 !!! note "Cumulative `SAC` is `CumulativeSAC1P`, not stock SB3 SAC"
     `algo_name` returns the bare name `"SAC"` for a cumulative off-policy run, but

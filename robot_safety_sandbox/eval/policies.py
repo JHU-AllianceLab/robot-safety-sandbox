@@ -94,8 +94,19 @@ def load_nominal(zip_path: str, device: str, quiet: bool = False):
   assumed to be a PPO zip.
   """
   with zipfile.ZipFile(zip_path) as z:
-    is_sac = "actor.optimizer.pth" in z.namelist()
-  if is_sac:
+    names = z.namelist()
+  is_sac = "actor.optimizer.pth" in names
+  if "world_model.pth" in names:
+    # A model-based task policy (train.py --family model_based on a cumulative
+    # task): safety_sb3's CumulativeSHAC1P. Its policy is an SB3
+    # ActorCriticPolicy used through its mean, so predict() is the usual one.
+    import safety_sb3
+    model = safety_sb3.CumulativeSHAC1P.load(zip_path, device=device)
+    if getattr(model, "_MODE", None) != "cumulative":
+      raise SystemExit(
+        f"{zip_path} is a {type(model).__name__[:-6]}{model._MODE!r} SHAC learner, "
+        "a safety twin, not a task policy; pass it as the safety policy.")
+  elif is_sac:
     # A cumulative SAC walker: safety_sb3's CumulativeSAC1P if this install has
     # it, else stock SB3 SAC (the weights are layout-identical).
     try:
@@ -156,10 +167,12 @@ def twin_class_name(zip_path: str) -> str:
   The learner class is not stored by SB3, but each of the three letters leaves a
   fingerprint that is, so the name is RECONSTRUCTED rather than guessed:
 
-    A  SAC saves ``actor.optimizer.pth`` (PPO saves ``policy.optimizer.pth``)
+    A  SAC saves ``actor.optimizer.pth`` (PPO saves ``policy.optimizer.pth``);
+       SHAC saves its learned dynamics as ``world_model.pth``
     P  a two-player twin saves the disturbance actor's optimizer, and its data
        carries ``ctrl_action_dim`` (where the joint action splits)
-    M  the buffer class: {ReachAvoid,Safety}{ReplayBuffer,RolloutBuffer}
+    M  the buffer class: {ReachAvoid,Safety}{ReplayBuffer,RolloutBuffer}; SHAC
+     keeps no buffer class, and its data carries the mode as ``_MODE``
 
   Returns "" when nothing safety_sb3-shaped is found (e.g. a stock SB3 zip), so
   the caller can fall back to trying candidates in order.
@@ -175,6 +188,14 @@ def twin_class_name(zip_path: str) -> str:
   with zipfile.ZipFile(zip_path) as z:
     names = set(z.namelist())
   data = _zip_data(zip_path)
+  if "world_model.pth" in names:      # SHAC: single-player, mode in the data
+    m = str(data.get("_MODE", ""))
+    if m == "cumulative":
+      raise SystemExit(
+        f"{zip_path} is a CumulativeSHAC1P task policy: its value is a return, "
+        "not a safety certificate, so it cannot be a safety twin.")
+    mode = {"safety": "Safety", "reach-avoid": "ReachAvoid"}.get(m, "")
+    return f"{mode}SHAC1P" if mode else ""
   sac = any(n.startswith("actor.optimizer") for n in names)
   alg = "SAC" if sac else "PPO"
   two = ("ctrl_action_dim" in data or any(n.startswith("dstb") for n in names))
@@ -192,11 +213,12 @@ def twin_class_name(zip_path: str) -> str:
 #: cannot be reconstructed (pre-rename checkpoints, hand-made zips).
 TWIN_CANDIDATES = (
   "ReachAvoidPPO1P", "SafetyPPO1P", "ReachAvoidSAC1P", "SafetySAC1P",
-  "ReachAvoidPPO2P", "SafetyPPO2P", "ReachAvoidSAC2P", "SafetySAC2P")
+  "ReachAvoidPPO2P", "SafetyPPO2P", "ReachAvoidSAC2P", "SafetySAC2P",
+  "ReachAvoidSHAC1P", "SafetySHAC1P")
 
 
 def load_twin(zip_path: str, device: str, quiet: bool = False):
-  """Load a safety twin -- any of the eight MAP cells -- plus its obs normalizer.
+  """Load a safety twin -- any of the ten MAP cells -- plus its obs normalizer.
 
   Returns ``(model, norm)`` where ``norm(raw_obs) -> normalized_obs`` applies
   the twin's own frozen statistics (clipped to +-10, the training convention).
@@ -285,10 +307,18 @@ def safety_modules(model, num_envs: int, device: str,
   out: dict = {}
 
   if hasattr(policy, "predict_values"):                     # on-policy twin
-    def value_fn(s_obs, **_):
-      with torch.no_grad():
-        return policy.predict_values(s_obs).squeeze(-1)
-    out["value_fn"] = value_fn
+    # A privileged (asymmetric) critic reads the CRITIC obs group, which the
+    # eval loop does not surface (it hands every module the actor obs), so it
+    # gets no value_fn: a filter that needs one stops with a named error
+    # (eval.filters._need) instead of a shape error inside the critic.
+    from ..envs.g1_recover.labels import is_asymmetric
+    if is_asymmetric(policy):
+      out["asymmetric_critic"] = True
+    else:
+      def value_fn(s_obs, **_):
+        with torch.no_grad():
+          return policy.predict_values(s_obs).squeeze(-1)
+      out["value_fn"] = value_fn
 
     def fallback_fn(s_obs, **_):
       with torch.no_grad():

@@ -44,6 +44,12 @@ try:
 except ImportError:  # cumulative-only install: tensor path disabled
   TensorVecEnv = object
   _HAS_SAFETY_SB3 = False
+# The model-based learners' env contract (safety_sb3 >= SHAC). An older
+# safety_sb3 simply has no SHAC to call world_model_spec().
+try:
+  from safety_sb3.tensor_env import WorldModelSpec
+except ImportError:
+  WorldModelSpec = None
 
 TERMINAL_MARGIN = -0.1  # g anchor on failure terminations (pre-reset hook)
 # A margin_fn may carry its own anchor as a ``terminal_margin`` attribute (read
@@ -699,6 +705,170 @@ class _MjlabCore:
       return None
     c = self._obs_dict[self.critic_obs_key].float()
     return torch.nan_to_num(c, nan=0.0, posinf=0.0, neginf=0.0)
+
+  # --- model-based learners (safety_sb3 SHAC) ---------------------------------
+  # A SHAC learner fits a world model on the RAW privileged critic group and
+  # rolls the actor inside it, so it must rebuild, from a predicted critic obs,
+  # the actor obs the deployed policy would see. Both hooks below are derived
+  # from the env's own managers -- term names, noise cfgs, DR events -- so no
+  # task has to describe its observation layout by hand.
+
+  def _obs_layout(self, group: str) -> dict:
+    """``{term: (start, size, cfg)}`` of a concatenated obs group, in order."""
+    om = self.mj.observation_manager
+    if not om.group_obs_concatenate[group]:
+      raise ValueError(f"obs group {group!r} is not concatenated")
+    out, start = {}, 0
+    for name, dims in zip(om.active_terms[group], om.group_obs_term_dim[group]):
+      size = int(np.prod(dims))
+      out[name] = (start, size, om.get_term_cfg(group, name))
+      start += size
+    return out
+
+  @staticmethod
+  def _term_noise_bounds(group: str, name: str, size: int, cfg):
+    """Additive uniform noise of one obs term as (low, high) per dim, in OBS
+    units (the term's scale applied, which mjlab applies after the noise)."""
+    from mjlab.utils.noise.noise_cfg import UniformNoiseCfg
+    if (cfg.history_length or 0) > 1 or cfg.delay_max_lag:   # 1 = this frame
+      raise ValueError(
+        f"obs term {group}/{name} keeps history / delay: a world-model state "
+        "of one frame cannot rebuild it")
+    zeros = torch.zeros(size)
+    noise = cfg.noise
+    if noise is None:
+      return zeros, zeros.clone()
+    if not (isinstance(noise, UniformNoiseCfg) and noise.operation == "add"):
+      raise ValueError(
+        f"obs term {group}/{name} has {type(noise).__name__}"
+        f"(operation={getattr(noise, 'operation', None)!r}); the world-model "
+        "spec describes additive uniform sensor noise only")
+
+    def per_dim(v):
+      # CPU: mjlab swaps cfg.scale for a tensor on the env device at init
+      t = torch.as_tensor(v, dtype=torch.float32).detach().cpu().flatten()
+      if t.numel() == 1:
+        return t.expand(size).clone()
+      if t.numel() != size:
+        raise ValueError(f"obs term {group}/{name}: noise bound of {t.numel()} "
+                         f"values for a {size}-dim term")
+      return t
+    lo, hi = per_dim(noise.n_min), per_dim(noise.n_max)
+    if cfg.scale is not None:
+      sc = per_dim(cfg.scale)
+      lo, hi = torch.minimum(lo * sc, hi * sc), torch.maximum(lo * sc, hi * sc)
+    return lo, hi
+
+  def world_model_spec(self):
+    """How a model-based learner reads the actor obs out of the model state.
+
+    The model state is the privileged critic group when one is surfaced
+    (``critic_obs_key``), else the actor obs itself. Each actor term is matched
+    BY NAME to its noise-free twin in the critic group; its sensor noise comes
+    from the actor term's ``UniformNoiseCfg``; the previous-action term (mjlab's
+    ``last_action``) is named so the learner can write the action it took
+    exactly -- but only when the obs holds exactly that action (unit
+    ``ctrl_gain``, nothing overwriting a slice of it, no adversary sharing the
+    head). See ``safety_sb3.tensor_env.WorldModelSpec``.
+    """
+    if WorldModelSpec is None:
+      return None
+    actor = self._obs_layout(self.obs_key)
+    obs_dim = sum(sz for _, sz, _ in actor.values())
+    lo, hi = torch.zeros(obs_dim), torch.zeros(obs_dim)
+    for name, (st, sz, cfg) in actor.items():
+      lo[st:st + sz], hi[st:st + sz] = self._term_noise_bounds(
+        self.obs_key, name, sz, cfg)
+    if self.critic_obs_key is None:
+      index, state = None, actor
+    else:
+      state = self._obs_layout(self.critic_obs_key)
+      index = []
+      for name, (_, sz, _) in actor.items():
+        twin = state.get(name)
+        if twin is None or twin[1] != sz:
+          raise ValueError(
+            f"actor obs term {name!r} ({sz} dims) has no same-size twin in the "
+            f"critic group {self.critic_obs_key!r}; a model-based learner "
+            "rebuilds the actor obs from it")
+        if twin[2].noise is not None:
+          raise ValueError(
+            f"critic term {name!r} is noisy; the model state must be the "
+            "noise-free twin of the actor obs")
+        index.extend(range(twin[0], twin[0] + sz))
+    last = None
+    if (self.ctrl_gain == 1.0 and not self.adversary
+            and self._joint_noise is None and self.hybrid_skill is None):
+      for name, (st, sz, cfg) in state.items():
+        if (getattr(cfg.func, "__name__", "") == "last_action"
+                and not (cfg.params or {}).get("action_name")
+                and cfg.scale is None and sz == self.ctrl_dim):
+          last = list(range(st, st + sz))
+          break
+    return WorldModelSpec(actor_obs_index=index, last_action_index=last,
+                          obs_noise_low=lo.tolist(), obs_noise_high=hi.tolist())
+
+  def _context_source(self, kind: str, field: str):
+    from .filters.rollout import _native
+    if kind == "model":
+      x = getattr(self.mj.sim.model, field, None)
+    else:
+      x = getattr(self._robot.data, field, None)
+    return None if x is None else _native(x)
+
+  #: MuJoCo constants mj_setConst RECOMPUTES from the randomized fields. The DR
+  #: field list carries them (a shadow must copy them), but as context they only
+  #: restate the draw: on G1 they are 90 of 123 columns, all functions of the
+  #: 3-dim torso COM offset.
+  _DERIVED_CONSTANTS = ("body_invweight0", "dof_invweight0", "tendon_invweight0",
+                        "body_subtreemass", "actuator_acc0", "actuator_length0",
+                        "tendon_length0")
+
+  def _context_columns(self) -> list:
+    """Which columns of which DR buffers differ across envs (deduplicated):
+    the realized draw, without the per-world copies of shared constants."""
+    from .filters.rollout import dr_identity_fields
+    model_fields, entity_fields = dr_identity_fields(self.mj)
+    model_fields = [f for f in model_fields if f not in self._DERIVED_CONSTANTS]
+    n = int(self.mj.num_envs)
+    cols, seen = [], []
+    if n < 2:
+      return cols
+    for kind, fields in (("model", model_fields), ("entity", entity_fields)):
+      for f in fields:
+        x = self._context_source(kind, f)
+        if x is None or not x.numel() or x.shape[0] != n:
+          continue
+        x = x.reshape(n, -1).float()
+        keep = []
+        for c in (x.std(0) > 1e-7).nonzero().flatten().tolist():
+          col = x[:, c]
+          if any(torch.equal(col, prev) for prev in seen):
+            continue
+          seen.append(col)
+          keep.append(c)
+        if keep:
+          cols.append((kind, f, torch.as_tensor(keep, device=x.device)))
+    return cols
+
+  def sim_context(self):
+    """The realized domain-randomization draw of each env, ``[num_envs, C]``,
+    or None when nothing is randomized per env.
+
+    Derived from the env's own DR events (filters.rollout.dr_identity_fields,
+    the same list a shadow sim copies to model the SAME robot): every column
+    of those buffers that differs across envs, deduplicated, minus the
+    constants MuJoCo derives from them -- on the G1 tasks the shared foot
+    friction, the torso COM offset and the per-joint encoder biases (33 dims).
+    All of them are ``startup`` draws, fixed per env for the run.
+    """
+    if getattr(self, "_ctx_cols", None) is None:
+      self._ctx_cols = self._context_columns()
+    if not self._ctx_cols:
+      return None
+    return torch.cat([self._context_source(kind, f).reshape(
+      int(self.mj.num_envs), -1)[:, idx].float()
+      for kind, f, idx in self._ctx_cols], dim=1)
 
   # --- per-episode regimes (safety_sb3 multi-gamma ladder) --------------------
   @property

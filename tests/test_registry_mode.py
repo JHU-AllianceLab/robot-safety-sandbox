@@ -117,6 +117,18 @@ def test_algo_name_is_mode_plus_algorithm_plus_players(
   assert algo_name(t, adversary=True, family=family) == f"{prefix}{alg}2P"
 
 
+@pytest.mark.parametrize("mode,name", [(AVOID, "SafetySHAC1P"),
+                                       (REACH_AVOID, "ReachAvoidSHAC1P"),
+                                       (CUMULATIVE, "CumulativeSHAC1P")])
+def test_model_based_family_is_shac_single_player(clean_registry, mode, name):
+  t = _reg(f"t_mb_{mode}", mode=mode,
+           margin_fn=None if mode == CUMULATIVE else _m(mode),
+           supports_adversary=True)
+  assert algo_name(t, family="model_based") == name
+  with pytest.raises(ValueError, match="two-player"):
+    algo_name(t, adversary=True, family="model_based")
+
+
 def test_algo_name_defaults_to_the_on_policy_family(clean_registry):
   t = _reg("t_family_default", mode=REACH_AVOID, margin_fn=_margins)
   assert algo_name(t) == "ReachAvoidPPO1P"
@@ -125,7 +137,7 @@ def test_algo_name_defaults_to_the_on_policy_family(clean_registry):
 def test_algo_name_refuses_an_unknown_family(clean_registry):
   t = _reg("t_family_bad", mode=AVOID, margin_fn=_m(AVOID))
   with pytest.raises(ValueError, match="unknown family"):
-    algo_name(t, family="model_based")
+    algo_name(t, family="no_such_family")
 
 
 @pytest.mark.parametrize("family,alg", [("on_policy", "PPO"),
@@ -243,10 +255,13 @@ def test_list_tasks_filters_by_mode(clean_registry):
 #: so a typo in the formula can't agree with a typo in the test.
 _EXPECTED = {
   AVOID: {"on_policy": ("SafetyPPO1P", "SafetyPPO2P"),
-          "off_policy": ("SafetySAC1P", "SafetySAC2P")},
+          "off_policy": ("SafetySAC1P", "SafetySAC2P"),
+          "model_based": ("SafetySHAC1P", None)},
   REACH_AVOID: {"on_policy": ("ReachAvoidPPO1P", "ReachAvoidPPO2P"),
-                "off_policy": ("ReachAvoidSAC1P", "ReachAvoidSAC2P")},
-  CUMULATIVE: {"on_policy": ("PPO", None), "off_policy": ("SAC", None)},
+                "off_policy": ("ReachAvoidSAC1P", "ReachAvoidSAC2P"),
+                "model_based": ("ReachAvoidSHAC1P", None)},
+  CUMULATIVE: {"on_policy": ("PPO", None), "off_policy": ("SAC", None),
+               "model_based": ("CumulativeSHAC1P", None)},
 }
 
 
@@ -273,5 +288,5 @@ def test_every_registered_task_resolves():
         "margins would never be computed, so the margin_fn is dead code")
     for family, (solo, duo) in _EXPECTED[s.mode].items():
       assert algo_name(t, family=family) == solo, (t, family)
-      if s.supports_adversary and s.mode != CUMULATIVE:
+      if s.supports_adversary and s.mode != CUMULATIVE and duo is not None:
         assert algo_name(t, adversary=True, family=family) == duo, (t, family)

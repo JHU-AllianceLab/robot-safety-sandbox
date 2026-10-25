@@ -112,7 +112,7 @@ lookup table, no per-task override:
 
 ```
 M = Mode       Safety | ReachAvoid | Cumulative    (the Bellman operator — a property of the TASK)
-A = Algorithm  PPO | SAC | A2C | DQN               (the RL update — chosen at the RUN: --family)
+A = Algorithm  PPO | SAC | SHAC | A2C | DQN        (the RL update — chosen at the RUN: --family)
 P = Players    1P | 2P                             (single | zero-sum — chosen at the RUN: --adversary)
 ```
 

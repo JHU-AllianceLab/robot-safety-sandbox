@@ -49,7 +49,8 @@ from robot_safety_sandbox import make_tensor  # noqa: E402
 # what the trainers' VideoWandbCallback renders). The P letter of the MAP is the
 # whole test, so it is a suffix check, not a table.
 _ALGOS = ("SafetyPPO1P", "SafetyPPO2P", "ReachAvoidPPO1P", "ReachAvoidPPO2P",
-          "SafetySAC1P", "SafetySAC2P", "ReachAvoidSAC1P", "ReachAvoidSAC2P")
+          "SafetySAC1P", "SafetySAC2P", "ReachAvoidSAC1P", "ReachAvoidSAC2P",
+          "SafetySHAC1P", "ReachAvoidSHAC1P", "CumulativeSHAC1P")
 
 
 class _PlayEnv:

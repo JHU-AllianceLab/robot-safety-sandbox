@@ -316,7 +316,7 @@ register(TaskSpec(
     | letter | source | here |
     |---|---|---|
     | **M**ode | the task's `mode=` (a property of its margins) | `ReachAvoid` |
-    | **A**lgorithm | the run's `--family` (`on_policy`→PPO, `off_policy`→SAC) | `PPO` |
+    | **A**lgorithm | the run's `--family` (`on_policy`→PPO, `off_policy`→SAC, `model_based`→SHAC) | `PPO` |
     | **P**layers | the run's `--adversary` | `1P` |
 
     | task `mode` | 1-player | 2-player (`--adversary`) |
@@ -476,8 +476,8 @@ Use `car_goal` as a template and swap one piece at a time:
 5. **Task** — one `TaskSpec` (`mode`, `end_criterion`, `ctrl_dim`), and a
    line in `__init__.py`.
 6. **Algorithm** — inherit the recipe; the MAP does the rest: `mode` picks avoid
-   vs reach-avoid (by whether you declared an `l`), `--family` picks PPO vs SAC,
-   `--adversary` picks 1P vs 2P.
+   vs reach-avoid (by whether you declared an `l`), `--family` picks PPO, SAC or
+   SHAC, `--adversary` picks 1P vs 2P.
 7. **Config + run** — a `configs/*.yaml` and `python examples/train.py --config …`.
 
 Deeper references: the [API guide](API.md) (the `g`/`l` contract, `TaskSpec`,

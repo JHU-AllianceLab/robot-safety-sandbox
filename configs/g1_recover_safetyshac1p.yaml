@@ -1,0 +1,106 @@
+# SafetySHAC1P on g1_recover: SuperMimic-style model-based training of the fall
+# fallback, with the imagined return replaced by the SAFETY value.
+# M=Safety (avoid-only), A=SHAC (BPTT through a learned world model), P=1P.
+#
+#   python examples/train.py --config configs/g1_recover_safetyshac1p.yaml \
+#       --out runs/g1_recover_shac
+#
+# THE LOOP (safety_sb3/shac.py). Each iteration collects ~1/utd_ratio vector
+# steps with the deterministic actor + N(0, action_noise_std^2), fits the world
+# model on k-step windows of the replay, then rolls the actor H steps through the
+# FROZEN model from replay states and ascends the imagined safety value
+#     R_t = (1-gamma) g_{t+1} + gamma min(g_{t+1}, R_{t+1}),   R_H = V(s_H)
+# -- the min-over-time margin, bootstrapped by the critic -- by backpropagation
+# through time. The critic then regresses the nested lambda-return of the same
+# rollout. V >= 0 keeps its certificate meaning.
+#
+# WORLD-MODEL STATE = the env's privileged "critic" group (114 dims: the
+# noise-free actor terms + base_lin_vel, pelvis height, foot terms); the actor's
+# 98-dim obs is rebuilt from it with the actor's sensor noise re-added (bridge
+# world_model_spec()), and the model is conditioned on the realized DR draw
+# (bridge sim_context(): foot friction, torso COM, encoder biases; 33 dims).
+#
+# NO PUSHES. The deterministic model cannot predict a push it is not told
+# about, so the trainer refuses the push / random-arm tasks. g1_recover's
+# randomness is in the start state: the bank's nominal / clean / PUSHED / fell /
+# synthetic rows, so post-push states are still in the replay and the imagined
+# rollouts start from them.
+#
+# EXPECT A TRANSIENT when the actor starts (wm_warmup_iters + actor_delay_iters):
+# the actor moves into states the warm start never visited, exploits the
+# model's errors there, and the real policy degrades -- on the first 25M-step
+# test run survival fell to ~0 for ~5M steps (wm/err_1step 0.03 -> 0.12), then
+# the model refit and the policy recovered PAST the warm start (at 25M: clean
+# 0.96, synthetic 0.95, pushed 0.90, fell 0.64 survival at rising levels). A
+# 1000-update actor LR ramp (actor_lr_warmup_iters) only delayed it.
+#
+# Watch: wm/err_1step and wm/err_8step (normalized MSE per state dim, falling),
+# wm/margin_loss and wm/done_bce (the heads the safety objective reads),
+# train/actor_objective (the imagined H-step safety value), imag/g_min,
+# train/explained_variance, rollout/fail_frac, env/Curriculum/recover/*.
+family: model_based      # SHAC family -- the train.py router reads this
+task: g1_recover
+num_envs: 4096
+steps: 1000000000
+seed: 0
+
+# The spawn recipe of configs/g1_recover_safetyppo1p.yaml, unchanged, so the two
+# learners are compared on the same start-state distribution.
+env_overrides:
+  dataset: null          # null -> data/g1_recover_states.pt or $SAFE_ZOO_G1_RECOVER_DATASET
+  weights: {nominal: 0.15, clean: 0.35, pushed: 0.15, fell: 0.20, synthetic: 0.15}
+  levels: 5
+  band_width: 0.4
+  init_level: 0
+  episode_length_s: 8.0
+
+# Warm start: the regularized privileged-critic push policy -- same 512-256-128
+# actor, same 114-dim critic input, so the actor AND the critic transfer, with
+# their obs normalizer. Its world model does not exist yet, so fit one first
+# (wm_warmup_iters, model only), then let the critic adapt to imagined returns
+# with the actor held (actor_delay_iters).
+load: runs/g1_recover_push_fast_privcrit/g1_recover_push_fast/final_model.zip
+wm_warmup_iters: 3000
+actor_delay_iters: 500
+norm_freeze_steps: 5000000
+
+# --- objective ------------------------------------------------------------------
+gamma: 0.99
+gamma_anneal: false
+gae_lambda: 0.95
+softmin_tau: 0.0         # exact min; e.g. 0.05 spreads the actor gradient over near-worst steps
+# Action regularization on the ACTOR LOSS (the margin stays the reward). In
+# VALUE units: the imagined objective is a margin in [-3, 3], not PPO's
+# normalized advantage, so these are a starting point -- compare
+# train/action_rate_loss x coef against train/actor_objective and adjust.
+action_rate_coef: 0.05
+action_mag_coef: 0.005
+
+# --- networks (paper: actor 2048-1024-512-256, world model 3x2048) ---------------
+net: "512,256,128"       # = the warm-start checkpoint
+wm_net: "1024,1024,1024" # half the paper's width: 16 GB shared with mjlab
+wm_head_net: "256,256"
+lr: 2.0e-4
+lr_decay_iters: 250000
+lr_min_frac: 0.03
+
+# --- imagination / world model / replay (paper values unless noted) --------------
+horizon: 32
+imagine_batch: 4096
+action_noise_std: 0.1
+wm_window: 8
+wm_batch: 2048
+wm_gradient_steps: 10
+critic_epochs: 5
+critic_minibatches: 4
+utd_ratio: 0.4
+learning_starts: 64
+replay_size: 500         # paper 1000; 500 x 4096 envs x (114 + 29) floats ~ 1.2 GiB
+tf32: false
+
+log_interval: 50
+checkpoint_every: 25000000
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false
