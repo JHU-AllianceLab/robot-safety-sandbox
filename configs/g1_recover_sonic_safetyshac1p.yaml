@@ -1,0 +1,73 @@
+# SafetySHAC1P vs SafetyPPO1P from scratch on SONIC's post-kick states -- the SHAC arm.
+#
+#   python examples/train.py --config configs/g1_recover_sonic_safetyshac1p.yaml \
+#       --seed 0 --out runs/shac_vs_ppo_sonic/shac_s0
+#   (the whole experiment: configs/sweeps/shac_vs_ppo_sonic/jobs.txt, then eval_jobs.txt)
+#
+# The configs/sweeps/shac_vs_ppo experiment (configs/g1_recover_selfhandover_
+# safety{shac,ppo}1p.yaml, whose headers say what the two arms share and what
+# they cannot) with two changes only:
+#   * the start states: SONIC's handover bank, data/g1_sonic_push_gfall_train_
+#     bank_net.pt (examples/harvest_g1_sonic_trajectories.py --task
+#     g1_recover_lafan: SONIC tracking LAFAN train clips, a pelvis velocity kick
+#     |dv| ~ U(0, 5) m/s, snapshots 0 / 0.1 / 0.2 / 0.3 s after it, harvested
+#     under g1_recover's own fall terminations; thinned by examples/
+#     dedup_start_bank.py at eta 0.1, which keeps ~all rows);
+#   * 1.5B env steps instead of 250M.
+# The task, margin and terminations are g1_recover's (g_fall: pelvis height,
+# tilt, non-foot contact; the episode ends at 70 deg tilt or a non-foot
+# contact), the policy the MLP 512-256-128, privileged critic, gamma 0.99.
+#
+family: model_based      # SHAC family -- the train.py router reads this
+task: g1_recover
+num_envs: 4096
+steps: 1500000000
+seed: 0
+
+# --- SHARED with the PPO arm (verbatim) ----------------------------------------
+env_overrides:
+  dataset: data/g1_sonic_push_gfall_train_bank_net.pt
+  weights: {handover: 1.0, nominal: 0.0, clean: 0.0, pushed: 0.0, fell: 0.0,
+            synthetic: 0.0, mocap: 0.0}
+  sampler: uniform       # handover rows drawn uniformly; no level curriculum
+  episode_length_s: 3.0
+  rest_terminate: true
+  rest_dwell_s: 0.4
+  rest_arm_s: 0.8
+
+privileged_critic: true  # the world-model state AND the critic's input
+gamma: 0.99
+gamma_anneal: false
+net: "512,256,128"
+action_rate_coef: 0.05   # value units here (see the PPO arm's header)
+action_mag_coef: 0.005
+
+# --- SHAC recipe (SuperMimic's values unless noted) ---------------------------
+lr: 2.0e-4
+lr_decay_iters: 146500   # = the run's iterations: 1.5B / (4096 x 2.5)
+lr_min_frac: 0.03
+wm_warmup_iters: 1000    # ~10M env steps of model-only fitting first (the model
+                         # reached its plateau error by ~350 iterations on G1)
+actor_delay_iters: 200   # ~2M more: the critic's first fit before the actor moves
+horizon: 32
+imagine_batch: 4096
+action_noise_std: 0.1
+softmin_tau: 0.0
+wm_net: "1024,1024,1024" # paper 3x2048; 16 GB shared with mjlab
+wm_head_net: "256,256"
+wm_window: 8
+wm_batch: 2048
+wm_gradient_steps: 10
+critic_epochs: 5
+critic_minibatches: 4
+utd_ratio: 0.4
+learning_starts: 64
+replay_size: 500         # paper 1000 per env; ~1.1 GiB at 4096 envs
+tf32: true               # the paper's precision; 1.18x faster here
+
+log_interval: 50
+checkpoint_every: 50000000
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

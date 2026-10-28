@@ -1,0 +1,13 @@
+# Held-out evaluation of configs/sweeps/shac_vs_ppo_sonic/jobs.txt: each final
+# policy from the SONIC handover bank of the LAFAN TEST clips
+# (data/g1_sonic_push_gfall_test_bank_net.pt, a separate harvest seed), K = 4
+# deterministic rollouts per row, no push, the training episode (3 s, rest
+# truncation), task g1_recover. Run after the training jobs; ~10 min each.
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo_sonic/eval_jobs.txt
+python examples/label_start_states.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --task g1_recover --no-push --bank data/g1_sonic_push_gfall_test_bank_net.pt --k 4 --out runs/shac_vs_ppo_sonic/eval/shac_s0.pt
+python examples/label_start_states.py --policy runs/shac_vs_ppo_sonic/ppo_s0/g1_recover/final_model.zip --task g1_recover --no-push --bank data/g1_sonic_push_gfall_test_bank_net.pt --k 4 --out runs/shac_vs_ppo_sonic/eval/ppo_s0.pt
+python examples/label_start_states.py --policy runs/shac_vs_ppo_sonic/shac_s1/g1_recover_safetyshac1p/final_model.zip --task g1_recover --no-push --bank data/g1_sonic_push_gfall_test_bank_net.pt --k 4 --out runs/shac_vs_ppo_sonic/eval/shac_s1.pt
+python examples/label_start_states.py --policy runs/shac_vs_ppo_sonic/ppo_s1/g1_recover/final_model.zip --task g1_recover --no-push --bank data/g1_sonic_push_gfall_test_bank_net.pt --k 4 --out runs/shac_vs_ppo_sonic/eval/ppo_s1.pt
+python examples/label_start_states.py --policy runs/shac_vs_ppo_sonic/shac_s2/g1_recover_safetyshac1p/final_model.zip --task g1_recover --no-push --bank data/g1_sonic_push_gfall_test_bank_net.pt --k 4 --out runs/shac_vs_ppo_sonic/eval/shac_s2.pt
+python examples/label_start_states.py --policy runs/shac_vs_ppo_sonic/ppo_s2/g1_recover/final_model.zip --task g1_recover --no-push --bank data/g1_sonic_push_gfall_test_bank_net.pt --k 4 --out runs/shac_vs_ppo_sonic/eval/ppo_s2.pt
+python examples/summarize_label_reports.py --group SHAC runs/shac_vs_ppo_sonic/eval/shac_s*.pt --group PPO runs/shac_vs_ppo_sonic/eval/ppo_s*.pt --out runs/shac_vs_ppo_sonic/summary_table.json  # always

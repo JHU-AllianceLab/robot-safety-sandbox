@@ -1,0 +1,19 @@
+# SHAC vs PPO from scratch on SONIC's post-kick states: SafetySHAC1P vs
+# SafetyPPO1P, 1.5B env steps, 3 seeds each, task g1_recover (its own margin
+# and fall terminations), MLP 512-256-128.
+# Configs: configs/g1_recover_sonic_safety{shac,ppo}1p.yaml. Start bank:
+# data/g1_sonic_push_gfall_train_bank_net.pt (copy it from the 5080 machine).
+#
+# One training run per line, one GPU each; independent of each other:
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo_sonic/jobs.txt --list
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo_sonic/jobs.txt --only $SLURM_ARRAY_TASK_ID   # array 1-6
+# Then the evaluations: configs/sweeps/shac_vs_ppo_sonic/eval_jobs.txt.
+#
+# Approximate cost per seed at 4096 envs (RTX 5080 throughput): SHAC ~13.5 h
+# (31k env-steps/s with TF32), PPO ~5.2 h (80k/s).
+python examples/train.py --config configs/g1_recover_sonic_safetyshac1p.yaml --seed 0 --wandb-project shac_vs_ppo_sonic --out runs/shac_vs_ppo_sonic/shac_s0
+python examples/train.py --config configs/g1_recover_sonic_safetyppo1p.yaml --seed 0 --wandb-project shac_vs_ppo_sonic --out runs/shac_vs_ppo_sonic/ppo_s0
+python examples/train.py --config configs/g1_recover_sonic_safetyshac1p.yaml --seed 1 --wandb-project shac_vs_ppo_sonic --out runs/shac_vs_ppo_sonic/shac_s1
+python examples/train.py --config configs/g1_recover_sonic_safetyppo1p.yaml --seed 1 --wandb-project shac_vs_ppo_sonic --out runs/shac_vs_ppo_sonic/ppo_s1
+python examples/train.py --config configs/g1_recover_sonic_safetyshac1p.yaml --seed 2 --wandb-project shac_vs_ppo_sonic --out runs/shac_vs_ppo_sonic/shac_s2
+python examples/train.py --config configs/g1_recover_sonic_safetyppo1p.yaml --seed 2 --wandb-project shac_vs_ppo_sonic --out runs/shac_vs_ppo_sonic/ppo_s2
