@@ -31,6 +31,17 @@ import torch
 
 # --- obs-normalizer discovery ------------------------------------------------
 
+def reset_policy_memory(policy, mask=None) -> None:
+  """Restart a recurrent policy's inference memory for the envs in ``mask``
+  (all when None): call it where an episode ended, and where the policy takes
+  over an env another controller drove (a handover). A no-op for a memoryless
+  policy (safety_sb3 ``RecurrentActorCriticPolicy._predict`` keeps the memory;
+  every other policy has none)."""
+  fn = getattr(policy, "reset_memory", None)
+  if fn is not None:
+    fn(mask)
+
+
 def find_obs_stats(zip_path: str, prefix: str, flat: str) -> str | None:
   """The obs-normalization stats file that belongs to ``zip_path``.
 

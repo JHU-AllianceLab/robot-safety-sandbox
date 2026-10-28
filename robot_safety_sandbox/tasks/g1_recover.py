@@ -57,6 +57,12 @@ below, whose target is the stance set after the push.
 ``g1_recover_lafan_ra_loose``
                           g1_recover_lafan_ra with the looser target
                           |v| <= 0.5 m/s, |w| <= 0.6 rad/s.
+``g1_recover_lafan_k``    g1_recover_lafan on the ViaLasso pipeline's safe set
+                          K (``envs/g1_recover/k_set.py``): its margin g_k
+                          (pelvis height, tilt, all 29 joint limits, non-foot
+                          contact; g < 0 iff outside K) and its termination
+                          (the episode ends when the state leaves K, instead
+                          of at 70 deg tilt / a 10 N non-foot contact).
 ``g1_recover_arm_random`` the actor owns legs + waist; the arms swing at random
                           (g1_stabilize_arm_random's generator, magnitude
                           curriculum and all), starting each episode from the
@@ -95,7 +101,9 @@ LAFAN_RA_TOLS = {"g1_recover_lafan_ra": (0.25, 0.30),
 
 
 def register_all() -> None:
-  from robot_safety_sandbox.envs.g1_recover.env_cfg import g1_recover_env_cfg
+  from robot_safety_sandbox.envs.g1_recover.env_cfg import (
+    g1_recover_env_cfg, g1_recover_k_env_cfg)
+  from robot_safety_sandbox.envs.g1_recover.k_set import CLAMP as K_CLAMP, g_k
   from robot_safety_sandbox.envs.g1_recover.targets import make_l_stance
   from robot_safety_sandbox.envs.g1_stabilize.env_cfg import g_fall
   # Every g1_recover* task but the g1_recover_lafan_ra* twins (below) is
@@ -183,6 +191,17 @@ def register_all() -> None:
     description="Recover from mocap / handover start states and one push "
                 "0.1-0.4 s after the spawn without falling (avoid-only, "
                 "single-player)."))
+  # The same task on the ViaLasso safe set K: margin g_k (already clipped and
+  # anchored to K, so compose's clamp is a no-op) and the episode ends on
+  # leaving K (k_set.use_k_terminations).
+  register(TaskSpec(
+    task_id="g1_recover_lafan_k", cfg_builder=g1_recover_k_env_cfg,
+    margin_fn=compose(g_k, clamp=K_CLAMP), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, dstb_dim=3, supports_adversary=False,
+    kwargs=lafan_kwargs(),
+    description="g1_recover_lafan with the ViaLasso safe set K as margin and "
+                "termination (pelvis >= 0.45 m, tilt <= 1 rad, joints within "
+                "range + 0.1 rad, no non-foot contact; avoid-only)."))
   # REACH-AVOID twins. avoid margin: g_fall; reach margin: the stance set at
   # the arm's tolerances, gated on the push (targets.make_l_stance). The rest
   # truncation dwells in the SAME gated set (rest_lin_tol / rest_ang_tol /

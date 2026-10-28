@@ -132,3 +132,12 @@ def g1_recover_env_cfg(play: bool = False,
     func=RecoverCurriculum, params=dict(common, ema=float(ema),
                                         online_alpha=float(online_alpha)))
   return cfg
+
+
+def g1_recover_k_env_cfg(play: bool = False, **kwargs) -> ManagerBasedRlEnvCfg:
+  """:func:`g1_recover_env_cfg` whose episodes end when the state leaves the
+  ViaLasso safe set K (``k_set.use_k_terminations``); same kwargs."""
+  from robot_safety_sandbox.envs.g1_recover.k_set import use_k_terminations
+  cfg = g1_recover_env_cfg(play=play, **kwargs)
+  use_k_terminations(cfg)
+  return cfg

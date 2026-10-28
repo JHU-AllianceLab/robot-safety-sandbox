@@ -82,7 +82,7 @@ from robot_safety_sandbox import make_tensor  # noqa: E402
 from robot_safety_sandbox.envs.g1_recover.labels import PolicyValue  # noqa: E402
 from robot_safety_sandbox.envs.g1_recover.states import (  # noqa: E402
   FIELDS, KIND_HANDOVER, KIND_PUSHED, save_bank, snapshot, speed_of)
-from robot_safety_sandbox.eval.policies import load_twin  # noqa: E402
+from robot_safety_sandbox.eval.policies import load_twin, reset_policy_memory  # noqa: E402
 
 IDLE, DELAY, WINDOW = 0, 1, 2
 
@@ -214,6 +214,7 @@ def harvest(env, model, norm, value, args) -> dict[str, torch.Tensor]:
     with torch.no_grad():
       act = torch.clamp(model.policy._predict(nobs, deterministic=True), low, high)
     obs, _g, dones, timeouts, _l = env.step_tensor(act)
+    reset_policy_memory(model.policy, dones)       # a recurrent policy restarts
     terminated = dones & ~timeouts
     rested = term_mgr.get_term("recovered") if has_rest else zeros
     count -= 1

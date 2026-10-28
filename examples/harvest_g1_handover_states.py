@@ -110,7 +110,7 @@ from robot_safety_sandbox.envs.g1_recover.playback import PlaybackDriver  # noqa
 from robot_safety_sandbox.envs.g1_recover.spawn import SOURCES  # noqa: E402
 from robot_safety_sandbox.envs.g1_recover.states import (  # noqa: E402
   FIELDS, KIND_HANDOVER, KIND_MOCAP, load_bank, save_bank, snapshot, speed_of)
-from robot_safety_sandbox.eval.policies import load_twin  # noqa: E402
+from robot_safety_sandbox.eval.policies import load_twin, reset_policy_memory  # noqa: E402
 
 PLAY, WINDOW, WAIT = 0, 1, 2
 
@@ -377,6 +377,9 @@ class Harvest:
       # 2. act: the replay where it runs, the fallback elsewhere
       if self.policy is not None:
         model, norm = self.policy
+        # the fallback's memory starts at its handover: held fresh while the
+        # replay drives the env (a no-op for a memoryless policy)
+        reset_policy_memory(model.policy, self.mode != WINDOW)
         with torch.no_grad():
           pol = torch.clamp(model.policy._predict(norm(obs), deterministic=True), low, high)
       else:

@@ -92,7 +92,7 @@ from robot_safety_sandbox.envs.g1_recover.labels import (  # noqa: E402
   PolicyValue, auc, fit_logistic, row_names, spearman)
 from robot_safety_sandbox.envs.g1_recover.states import (  # noqa: E402
   KIND_HANDOVER, load_bank, save_bank)
-from robot_safety_sandbox.eval.policies import load_twin  # noqa: E402
+from robot_safety_sandbox.eval.policies import load_twin, reset_policy_memory  # noqa: E402
 
 #: Names for rows without a category of their own (walker / synthetic rows),
 #: by ``kind``.
@@ -227,6 +227,7 @@ def rollouts(env, model, norm, value, target: torch.Tensor, kinds: torch.Tensor,
     prev_act = act
     cursor = int(mj._zoo_spawn_cursor)
     obs, _g, dones, timeouts, _l = env.step_tensor(act)
+    reset_policy_memory(model.policy, dones)       # a recurrent policy restarts
     elapsed += 1
     it += 1
     since_accept += 1

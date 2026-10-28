@@ -36,7 +36,7 @@ except ImportError:
 
 from robot_safety_sandbox import make_tensor  # noqa: E402
 from robot_safety_sandbox.callbacks import _record_clip  # noqa: E402
-from robot_safety_sandbox.eval.policies import load_twin  # noqa: E402
+from robot_safety_sandbox.eval.policies import load_twin, reset_policy_memory  # noqa: E402
 
 
 def _parse_overrides(items):
@@ -96,6 +96,7 @@ def main():
     with th.no_grad():
       act = model.policy._predict(norm(obs), deterministic=True)
     obs, _g, _d, _t, _l = env.step_tensor(th.clamp(act, -b, b))
+    reset_policy_memory(model.policy, _d)          # a recurrent policy restarts
     return obs
 
   out = args.out

@@ -80,6 +80,8 @@ ask which producer wrote a bank and banks of different producers concatenate:
                            snapshot (NaN)
     delay_steps (N,)       the frontier harvester's steps from the push end to
                            the snapshot (-1)
+    traj_index (N,)        the SONIC harvester's trajectory (episode) index of
+                           the row in ``meta["trajectories"]`` (-1)
 
 SEVERAL FILES. ``load_bank([a, b, ...])`` concatenates the files' rows in the
 given order and adds ``part`` (the index of the file each row came from); its
@@ -151,6 +153,7 @@ OPTIONAL_FIELDS: dict[str, tuple[torch.dtype, tuple[int, ...], object]] = {
   "monitor_value": (torch.float32, (), _NAN),
   "value": (torch.float32, (), _NAN),
   "delay_steps": (torch.long, (), -1),
+  "traj_index": (torch.long, (), -1),
 }
 
 #: The G1 sole collision capsules: 7 per foot (``left_foot1..7_collision``).

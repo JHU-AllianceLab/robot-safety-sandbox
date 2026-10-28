@@ -158,6 +158,8 @@ class _ClipRecorder:
 
   def _emit_clip(self):
     self._mirror_push()
+    from robot_safety_sandbox.eval.policies import reset_policy_memory
+    reset_policy_memory(self.model.policy)          # a clip starts fresh episodes
     path = _record_clip(self._env, self._predict_step, self.video_len,
                         self.fps, _clip_path(self._outdir, self.num_timesteps),
                         self._bound)
@@ -218,6 +220,9 @@ class VideoWandbCallback(_ClipRecorder, BaseCallback):
     with th.no_grad():
       act = self.model.policy._predict(o, deterministic=True)
     obs, _g, _d, _t, _l = self._env.step_tensor(th.clamp(act, -bound, bound))
+    if bool(_d.any()):
+      from robot_safety_sandbox.eval.policies import reset_policy_memory
+      reset_policy_memory(self.model.policy, _d)
     return obs
 
 
@@ -374,7 +379,7 @@ class CriticWarmupCallback(BaseCallback):
 
   #: Parameter-name fragments that belong to the VALUE pathway of an SB3
   #: ActorCriticPolicy; everything else in the policy is the actor.
-  _VALUE_KEYS = ("value_net",)
+  _VALUE_KEYS = ("value_net", "memory_c")
 
   def __init__(self, warmup_steps: int = 0):
     super().__init__()

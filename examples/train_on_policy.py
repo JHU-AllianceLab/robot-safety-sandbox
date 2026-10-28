@@ -113,6 +113,8 @@ _SAFETY_ONLY = (
   "ladder_hysteresis", "force_start",
   # the asymmetric (privileged) critic is a safety_sb3 tensor-path feature
   "privileged_critic",
+  # ... and so is the recurrent (LSTM) policy
+  "policy", "lstm_hidden", "lstm_layers", "lstm_net",
 )
 
 
@@ -448,6 +450,19 @@ def main():
   p.add_argument("--net", default="512,256,128",
                  help="comma-separated hidden dims for pi & vf "
                       "(safety: 128,128,128)")
+  p.add_argument("--policy", choices=("mlp", "lstm"), default="mlp",
+                 help="mlp: the MLP actor-critic (--net). lstm: an LSTM memory "
+                      "per half followed by an ELU MLP (--lstm-net), the shape of "
+                      "unitree_rl_gym's recurrent G1 policy (motion.pt: LSTM 64 -> "
+                      "32 ELU). safety_sb3 RecurrentActorCriticPolicy; single "
+                      "player, no multi-gamma heads, no action penalties.")
+  p.add_argument("--lstm-hidden", type=int, default=64,
+                 help="--policy lstm: LSTM hidden size of the actor and the critic")
+  p.add_argument("--lstm-layers", type=int, default=1,
+                 help="--policy lstm: stacked LSTM layers")
+  p.add_argument("--lstm-net", default="32",
+                 help="--policy lstm: comma-separated hidden dims of the MLP after "
+                      "each LSTM (pi & vf)")
   p.add_argument("--vf-coef", type=float, default=0.5,
                  help="value loss coefficient (rsl_rl safety uses 1.0)")
   # The safety reward IS the margin g, so action costs cannot go on the reward
@@ -618,8 +633,24 @@ def main():
           f"on head {args.head_init}; env.n_regimes={getattr(env, 'n_regimes', 1)}")
 
   net = [int(x) for x in args.net.split(",") if x.strip()]
+  pkw = dict(log_std_init=math.log(0.3), net_arch=dict(pi=net, vf=net))
+  policy_name = "MlpPolicy"
+  if args.policy == "lstm":
+    if args.adversary:
+      raise SystemExit("[policy] --policy lstm is single-player only")
+    if not hasattr(_safety_sb3, "RecurrentActorCriticPolicy"):
+      raise SystemExit("[policy] this safety_sb3 has no RecurrentActorCriticPolicy; "
+                       "update safety-stable-baselines")
+    import torch.nn as _nn
+    net = [int(x) for x in args.lstm_net.split(",") if x.strip()]
+    policy_name = "LstmPolicy"
+    pkw = dict(log_std_init=math.log(0.3), net_arch=dict(pi=net, vf=net),
+               activation_fn=_nn.ELU, lstm_hidden=args.lstm_hidden,
+               lstm_layers=args.lstm_layers)
+    print(f"[policy] LSTM actor-critic: obs -> LSTM({args.lstm_hidden} x "
+          f"{args.lstm_layers}) -> ELU MLP {net} (actor and critic each)")
   model = Algo(
-    "MlpPolicy", env, **akw, **gamma_kw,
+    policy_name, env, **akw, **gamma_kw,
     n_steps=args.n_steps, batch_size=args.num_envs * args.n_steps // 4, n_epochs=5,
     gae_lambda=0.95, learning_rate=args.lr,
     # gamma anneal (-> 0.9999) is an HJ/SAC safety-VALUE device; on PPO's GAE
@@ -631,8 +662,7 @@ def main():
     max_grad_norm=1.0, normalize_obs=True,
     adaptive_lr=args.adaptive_lr,
     desired_kl=args.desired_kl if args.adaptive_lr else None,
-    policy_kwargs=dict(log_std_init=math.log(0.3),
-                       net_arch=dict(pi=net, vf=net)),
+    policy_kwargs=pkw,
     seed=args.seed, verbose=1, device=args.device,
     tensorboard_log=outdir)
   print(f"[recipe] net={net} ent_coef={args.ent_coef} "
@@ -758,6 +788,10 @@ def main():
       cme = getattr(pol, "critic_mlp_extractor", None)
       if cme is not None:
         cme.value_net.apply(partial(pol.init_weights, gain=math.sqrt(2)))
+      # A recurrent critic's memory is value pathway too.
+      mem = getattr(pol, "memory_c", None)
+      if mem is not None:
+        mem.reset_parameters()
       pol.value_net.apply(partial(pol.init_weights, gain=1.0))
       # Fresh optimizer moments: stale Adam second-moments on the just-reset value
       # params would produce a huge effective first step and re-explode the value.

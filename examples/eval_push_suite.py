@@ -362,7 +362,9 @@ def run_policy(env, setting, cells, total, grid, pol, ctx, args) -> dict:
   columnar records (see push_suite.RECORD_FIELDS)."""
   from robot_safety_sandbox.envs.g1_recover.playback import PlaybackDriver
   from robot_safety_sandbox.envs.g1_recover.targets import make_l_stance
+  from robot_safety_sandbox.eval.policies import reset_policy_memory
   name, _path, model, norm, vfn = pol
+  reset_policy_memory(model.policy)                # every policy starts fresh
   mj, dev, n = env.mj, env.device, env.num_envs
   dt = float(mj.step_dt)
   push = env._push
@@ -542,11 +544,16 @@ def run_policy(env, setting, cells, total, grid, pol, ctx, args) -> dict:
         n_after[k] += after.long()
         n_in[k] += (after & inside).long()
     last = torch.where(open_.unsqueeze(1), pos, last)
+    if driver is not None:
+      # the policy's memory starts at the handover: hold it fresh while the
+      # replay still drives the env (a no-op for a memoryless policy)
+      reset_policy_memory(model.policy, driver.active)
     with torch.no_grad():
       act = torch.clamp(model.policy._predict(norm(obs), deterministic=True), low, high)
     if driver is not None:
       act = driver.actions(act)
     obs, _g, dones, timeouts, _l = env.step_tensor(act)
+    reset_policy_memory(model.policy, dones)
     if driver is not None:
       driver.advance()
     t += 1
