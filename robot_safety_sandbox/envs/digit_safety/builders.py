@@ -169,7 +169,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       scale=1 / terrain_scan.max_distance,
     ),
     "foot_height": ObservationTermCfg(
-      func=mdp.foot_height,
+      func=zoo_mdp.foot_height,
       params={"asset_cfg": SceneEntityCfg("robot", site_names=())},  # Set per-robot.
     ),
     "foot_air_time": ObservationTermCfg(
@@ -331,7 +331,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       params={"command_name": "twist", "std": math.sqrt(0.5)},
     ),
     "upright": RewardTermCfg(
-      func=mdp.flat_orientation,
+      func=zoo_mdp.flat_orientation,
       weight=1.0,
       params={
         "std": math.sqrt(0.2),
@@ -375,7 +375,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       },
     ),
     "foot_clearance": RewardTermCfg(
-      func=mdp.feet_clearance,
+      func=zoo_mdp.feet_clearance,
       weight=-2.0,
       params={
         "target_height": 0.1,
@@ -385,7 +385,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       },
     ),
     "foot_swing_height": RewardTermCfg(
-      func=mdp.feet_swing_height,
+      func=zoo_mdp.feet_swing_height,
       weight=-0.25,
       params={
         "sensor_name": "feet_ground_contact",
@@ -434,7 +434,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
 
   curriculum = {
     "terrain_levels": CurriculumTermCfg(
-      func=mdp.terrain_levels_vel,
+      func=zoo_mdp.terrain_levels_vel,
       params={"command_name": "twist"},
     ),
     "command_vel": CurriculumTermCfg(
@@ -1228,6 +1228,8 @@ def digit_v3_flat_safety_with_box_env_cfg(
       r"^(left|right)_elbow_platform$",  # forearm platforms
       r"^box_",  # box panels
     ),
+    contype=1,
+    conaffinity=1,
     condim=4,
     priority=1,
     friction=(1.0, 0.005, 0.0001),

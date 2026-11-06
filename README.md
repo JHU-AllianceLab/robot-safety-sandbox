@@ -8,7 +8,7 @@ and zero-sum two-player, on the GPU end-to-end.
 
 [![docs](https://img.shields.io/badge/docs-online-b7472a)](https://saferoboticslab.github.io/robot-safety-sandbox/)
 [![release](https://img.shields.io/github/v/tag/SafeRoboticsLab/robot-safety-sandbox?label=release&color=00796b)](https://github.com/SafeRoboticsLab/robot-safety-sandbox/releases)
-[![python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ### [📖 Read the documentation →](https://saferoboticslab.github.io/robot-safety-sandbox/)
@@ -60,7 +60,7 @@ the full API + CLI reference. **Start there.**
 
 ## Requirements
 
-**Linux + an NVIDIA GPU**, Python ≥ 3.10, and the pinned mjlab / MuJoCo-Warp sim stack. Robot assets
+**Linux + an NVIDIA GPU**, Python ≥ 3.11, and the pinned mjlab / MuJoCo-Warp sim stack. Robot assets
 (Go2, Digit), terrains, and the handover dataset ship natively in-tree. `safety_sb3` is a pinned pip
 dependency. See [requirements](https://saferoboticslab.github.io/robot-safety-sandbox/getting-started/requirements/).
 

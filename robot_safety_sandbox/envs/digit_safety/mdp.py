@@ -24,6 +24,9 @@ Provenance (fork = MjlabSafety_Digit @ 28b7ed9):
 * fork ``src/mjlab/tasks/velocity/mdp/rewards.py`` (all fork-only):
     - ``undesired_contacts``, ``joint_deviation_l1``, ``lin_vel_z_l2``,
       ``stand_still_joint_deviation_l1``, ``stand_still_flat_orientation_l2``
+* stock mjlab 1.2.0 ``src/mjlab/tasks/velocity/mdp`` (changed upstream since):
+    - ``foot_height``, ``flat_orientation``, ``feet_clearance``,
+      ``feet_swing_height``, ``terrain_levels_vel``
 * fork ``src/mjlab/rl/safety_vecenv_wrapper.py``:
     - ``_FOOT_AND_KNEE_BODIES``  (constant only; the wrapper itself is not
       vendored — the zoo has its own bridge)
@@ -49,6 +52,7 @@ from mjlab.utils.nan_guard import NanGuard
 if TYPE_CHECKING:
   from mjlab.entity import Entity
   from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
+  from mjlab.managers.reward_manager import RewardTermCfg
   from mjlab.sensor import ContactSensor
   from mjlab.viewer.debug_visualizer import DebugVisualizer
 
@@ -652,3 +656,160 @@ def stand_still_flat_orientation_l2(
     xy_squared = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
 
   return is_standing * xy_squared
+
+
+##
+# Stock mjlab 1.2.0 velocity-task terms (``mjlab/tasks/velocity/mdp``).
+# mjlab >= 1.3 changed their signatures or semantics: foot terms now read a
+# TerrainHeightSensor instead of site z, ``flat_orientation`` was replaced by a
+# terrain-aware upright reward, and ``terrain_levels_vel`` uses a new
+# promotion rule tied to mjlab's own UniformVelocityCommand. The Digit tasks
+# were trained with the 1.2.0 versions, so they are copied verbatim here
+# (only the default-asset-cfg constant name was adjusted).
+##
+
+
+def foot_height(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+  asset: Entity = env.scene[asset_cfg.name]
+  return asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+
+
+def flat_orientation(
+  env: ManagerBasedRlEnv,
+  std: float,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward flat base orientation (robot being upright).
+
+  If asset_cfg has body_ids specified, computes the projected gravity
+  for that specific body. Otherwise, uses the root link projected gravity.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+
+  # If body_ids are specified, compute projected gravity for that body.
+  if asset_cfg.body_ids:
+    body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # [B, N, 4]
+    body_quat_w = body_quat_w.squeeze(1)  # [B, 4]
+    gravity_w = asset.data.gravity_vec_w  # [3]
+    projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)  # [B, 3]
+    xy_squared = torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)
+  else:
+    # Use root link projected gravity.
+    xy_squared = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
+  return torch.exp(-xy_squared / std**2)
+
+
+def feet_clearance(
+  env: ManagerBasedRlEnv,
+  target_height: float,
+  command_name: str | None = None,
+  command_threshold: float = 0.01,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize deviation from target clearance height, weighted by foot velocity."""
+  asset: Entity = env.scene[asset_cfg.name]
+  foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]  # [B, N]
+  foot_vel_xy = asset.data.site_lin_vel_w[:, asset_cfg.site_ids, :2]  # [B, N, 2]
+  vel_norm = torch.norm(foot_vel_xy, dim=-1)  # [B, N]
+  delta = torch.abs(foot_z - target_height)  # [B, N]
+  cost = torch.sum(delta * vel_norm, dim=1)  # [B]
+  if command_name is not None:
+    command = env.command_manager.get_command(command_name)
+    if command is not None:
+      linear_norm = torch.norm(command[:, :2], dim=1)
+      angular_norm = torch.abs(command[:, 2])
+      total_command = linear_norm + angular_norm
+      active = (total_command > command_threshold).float()
+      cost = cost * active
+  return cost
+
+
+class feet_swing_height:
+  """Penalize deviation from target swing height, evaluated at landing."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    self.sensor_name = cfg.params["sensor_name"]
+    self.site_names = cfg.params["asset_cfg"].site_names
+    self.peak_heights = torch.zeros(
+      (env.num_envs, len(self.site_names)), device=env.device, dtype=torch.float32
+    )
+    self.step_dt = env.step_dt
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    target_height: float,
+    command_name: str,
+    command_threshold: float,
+    asset_cfg: SceneEntityCfg,
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene[sensor_name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    foot_heights = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+    in_air = contact_sensor.data.found == 0
+    self.peak_heights = torch.where(
+      in_air,
+      torch.maximum(self.peak_heights, foot_heights),
+      self.peak_heights,
+    )
+    first_contact = contact_sensor.compute_first_contact(dt=self.step_dt)
+    linear_norm = torch.norm(command[:, :2], dim=1)
+    angular_norm = torch.abs(command[:, 2])
+    total_command = linear_norm + angular_norm
+    active = (total_command > command_threshold).float()
+    error = self.peak_heights / target_height - 1.0
+    cost = torch.sum(torch.square(error) * first_contact.float(), dim=1) * active
+    num_landings = torch.sum(first_contact.float())
+    peak_heights_at_landing = self.peak_heights * first_contact.float()
+    mean_peak_height = torch.sum(peak_heights_at_landing) / torch.clamp(
+      num_landings, min=1
+    )
+    env.extras["log"]["Metrics/peak_height_mean"] = mean_peak_height
+    self.peak_heights = torch.where(
+      first_contact,
+      torch.zeros_like(self.peak_heights),
+      self.peak_heights,
+    )
+    return cost
+
+
+def terrain_levels_vel(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor,
+  command_name: str,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  asset: Entity = env.scene[asset_cfg.name]
+
+  terrain = env.scene.terrain
+  assert terrain is not None
+  terrain_generator = terrain.cfg.terrain_generator
+  assert terrain_generator is not None
+
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+
+  # Compute the distance the robot walked.
+  distance = torch.norm(
+    asset.data.root_link_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2], dim=1
+  )
+
+  # Robots that walked far enough progress to harder terrains.
+  move_up = distance > terrain_generator.size[0] / 2
+
+  # Robots that walked less than half of their required distance go to simpler
+  # terrains.
+  move_down = (
+    distance < torch.norm(command[env_ids, :2], dim=1) * env.max_episode_length_s * 0.5
+  )
+  move_down *= ~move_up
+
+  # Update terrain levels.
+  terrain.update_env_origins(env_ids, move_up, move_down)
+
+  return torch.mean(terrain.terrain_levels.float())

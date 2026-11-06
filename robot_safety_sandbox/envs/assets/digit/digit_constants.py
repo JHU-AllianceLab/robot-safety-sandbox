@@ -15,7 +15,6 @@ import numpy as np
 
 from mjlab.actuator import BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
-from mjlab.utils.os import update_assets
 from mjlab.utils.spec_config import CollisionCfg
 
 ##
@@ -26,15 +25,17 @@ DIGIT_XML: Path = Path(__file__).resolve().parent / "xmls" / "digit.xml"
 assert DIGIT_XML.exists()
 
 
-def get_assets(meshdir: str) -> dict[str, bytes]:
-  assets: dict[str, bytes] = {}
-  update_assets(assets, DIGIT_XML.parent / "meshes", meshdir)
-  return assets
+def _poly(linear: float) -> list[float]:
+  """MjsJoint stiffness/damping value for a purely linear coefficient.
+
+  Since MuJoCo 3.14 these are 3-vectors (linear term + two polynomial terms);
+  ``[k, 0, 0]`` compiles to the same model as the old scalar ``k``.
+  """
+  return [float(linear), 0.0, 0.0]
 
 
 def get_spec() -> mujoco.MjSpec:
   spec = mujoco.MjSpec.from_file(str(DIGIT_XML))
-  spec.assets = get_assets(spec.meshdir)
   # Make the XML floor plane invisible — the terrain system provides its
   # own ground.  Having both visible causes z-fighting (flickering).
   # The geom is kept (not deleted) so it can be re-activated if needed.
@@ -195,6 +196,9 @@ DIGIT_ACTUATOR_A = BuiltinPositionActuatorCfg(
   damping=_DAMPING_A,
   effort_limit=_EFFORT_A,
   armature=_ARMATURE_A,
+  # mjlab>=1.3 defaults frictionloss to None (keep the XML value); 0.0 keeps
+  # the pre-1.3 behavior these policies were trained with.
+  frictionloss=0.0,
 )
 
 DIGIT_ACTUATOR_B = BuiltinPositionActuatorCfg(
@@ -206,6 +210,9 @@ DIGIT_ACTUATOR_B = BuiltinPositionActuatorCfg(
   damping=_DAMPING_B,
   effort_limit=_EFFORT_B,
   armature=_ARMATURE_B,
+  # mjlab>=1.3 defaults frictionloss to None (keep the XML value); 0.0 keeps
+  # the pre-1.3 behavior these policies were trained with.
+  frictionloss=0.0,
 )
 
 DIGIT_ACTUATOR_C_HIP_PITCH = BuiltinPositionActuatorCfg(
@@ -214,6 +221,9 @@ DIGIT_ACTUATOR_C_HIP_PITCH = BuiltinPositionActuatorCfg(
   damping=_DAMPING_C,
   effort_limit=_EFFORT_C_HIP_PITCH,
   armature=_ARMATURE_C,
+  # mjlab>=1.3 defaults frictionloss to None (keep the XML value); 0.0 keeps
+  # the pre-1.3 behavior these policies were trained with.
+  frictionloss=0.0,
 )
 
 DIGIT_ACTUATOR_C_KNEE = BuiltinPositionActuatorCfg(
@@ -222,6 +232,9 @@ DIGIT_ACTUATOR_C_KNEE = BuiltinPositionActuatorCfg(
   damping=_DAMPING_C,
   effort_limit=_EFFORT_C_KNEE,
   armature=_ARMATURE_C,
+  # mjlab>=1.3 defaults frictionloss to None (keep the XML value); 0.0 keeps
+  # the pre-1.3 behavior these policies were trained with.
+  frictionloss=0.0,
 )
 
 DIGIT_ACTUATOR_D = BuiltinPositionActuatorCfg(
@@ -233,6 +246,9 @@ DIGIT_ACTUATOR_D = BuiltinPositionActuatorCfg(
   damping=_DAMPING_D,
   effort_limit=_EFFORT_D,
   armature=_ARMATURE_D,
+  # mjlab>=1.3 defaults frictionloss to None (keep the XML value); 0.0 keeps
+  # the pre-1.3 behavior these policies were trained with.
+  frictionloss=0.0,
 )
 
 ##
@@ -252,6 +268,8 @@ HOME_KEYFRAME = EntityCfg.InitialStateCfg(
 # Foot geoms get condim=3 with friction; body geoms use XML defaults (condim=3).
 FEET_COLLISION = CollisionCfg(
   geom_names_expr=(r"^(left|right)_toe_roll_collision$",),
+  contype=1,
+  conaffinity=1,
   condim=3,
   priority=1,
   friction=(0.6,),
@@ -445,8 +463,8 @@ def get_spec_upright_calibrated(
     j.type = mujoco.mjtJoint.mjJNT_HINGE
     j.axis[:] = np.array([0.0, 0.0, 1.0])
     j.pos[:] = np.array([0.0, 0.0, 0.0])
-    j.stiffness = stiffness
-    j.damping = _SPRING_DAMPING
+    j.stiffness = _poly(stiffness)
+    j.damping = _poly(_SPRING_DAMPING)
     j.armature = _SPRING_ARMATURE
     if jrange is not None:
       j.limited = True
@@ -458,7 +476,7 @@ def get_spec_upright_calibrated(
       continue
     for j in spec.joints:
       if j.name and re.fullmatch(pattern, j.name):
-        j.damping = damping
+        j.damping = _poly(damping)
 
   if toe_roll_stiffness > 0.0:
     # NOTE: mutate via spec.joints iteration handles — in mujoco 3.6,
@@ -466,8 +484,8 @@ def get_spec_upright_calibrated(
     # other spec surgery in the same pass.
     for j in spec.joints:
       if j.name in ("left_toe_roll_joint", "right_toe_roll_joint"):
-        j.stiffness = toe_roll_stiffness
-        j.damping = 3.0
+        j.stiffness = _poly(toe_roll_stiffness)
+        j.damping = _poly(3.0)
 
   # Rebuild the 'standing' keyframe for the new nq: old joints keep their
   # settled values, the spring joints start at 0 (their unloaded state).

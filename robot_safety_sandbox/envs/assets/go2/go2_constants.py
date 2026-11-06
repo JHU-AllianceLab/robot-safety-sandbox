@@ -7,7 +7,6 @@ import mujoco
 from mjlab.actuator import BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.actuator import ElectricActuator, reflected_inertia
-from mjlab.utils.os import update_assets
 from mjlab.utils.spec_config import CollisionCfg
 
 ##
@@ -18,15 +17,8 @@ GO2_XML: Path = Path(__file__).resolve().parent / "xmls" / "go2.xml"
 assert GO2_XML.exists()
 
 
-def get_assets(meshdir: str) -> dict[str, bytes]:
-  assets: dict[str, bytes] = {}
-  update_assets(assets, GO2_XML.parent / "assets", meshdir)
-  return assets
-
-
 def get_spec() -> mujoco.MjSpec:
   spec = mujoco.MjSpec.from_file(str(GO2_XML))
-  spec.assets = get_assets(spec.meshdir)
   return spec
 
 
@@ -101,7 +93,7 @@ FEET_ONLY_COLLISION = CollisionCfg(
 FULL_COLLISION = CollisionCfg(
   geom_names_expr=(".*_collision",),
   condim={_foot_regex: 3, ".*_collision": 1},
-  priority={_foot_regex: 1},
+  priority={_foot_regex: 1, ".*": 0},
   friction={_foot_regex: (0.6,)},
   solimp={_foot_regex: (0.9, 0.95, 0.023)},
   contype=1,

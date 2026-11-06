@@ -13,27 +13,28 @@ machine (see Verification).
 
 ## Requirements
 
-- Linux, NVIDIA GPU (tested: RTX 4070 / Ada `sm_89`, RTX 5090 / Blackwell
-  `sm_120`), recent driver (CUDA 12.8+ runtime compatibility).
-- Python ≥ 3.10, conda recommended.
+- Linux, NVIDIA GPU (tested: RTX 5090 / Blackwell `sm_120`), driver with
+  CUDA 13.0 support (≥ 580) for the cu130 torch wheels; on CUDA 12 drivers use
+  the cu126 wheels instead (see step 1).
+- Python ≥ 3.11 (mjlab main dropped 3.10), conda recommended.
 
 ## Install (from scratch)
 
 ```bash
-conda create -y -n mjlab python=3.10
-conda activate mjlab
+conda create -y -n mjlab316 python=3.12
+conda activate mjlab316
 
-# 1. torch — cu128 wheels cover BOTH Ada (sm_89) and Blackwell (sm_120)
-#    (validated with 2.10.0+cu128 and 2.11.0+cu128):
-pip install torch --index-url https://download.pytorch.org/whl/cu128
+# 1. torch >= 2.14 (required by mjlab main). cu130 needs a CUDA 13 driver;
+#    on CUDA 12 drivers use .../whl/cu126 instead:
+pip install "torch>=2.14.0" --index-url https://download.pytorch.org/whl/cu130
 
-# 2. STOCK mjlab, pinned to the API the zoo targets — WITH its sim stack
-#    pinned too. mjlab 1.2.0 does not pin mujoco/warp itself, and it sets
-#    sim options (e.g. ls_parallel) that were REMOVED in MuJoCo Warp 3.9.1,
-#    so an unpinned install breaks at env build. It also imports scipy
-#    without declaring it.
-pip install "mjlab==1.2.0" "mujoco==3.6.0" "mujoco-warp==3.6.0" \
-            "warp-lang==1.12.0" scipy
+# 2. STOCK mjlab, pinned to a main-branch commit: no released mjlab supports
+#    MuJoCo 3.16 yet (1.6.0 pins ~=3.11). This commit pins
+#    mujoco~=3.16.0 / mujoco-warp~=3.16.0 itself; we pin the exact patch too.
+#    warp-lang comes from NVIDIA's index.
+pip install --extra-index-url https://pypi.nvidia.com \
+  "mjlab @ git+https://github.com/mujocolab/mjlab.git@dcdf6ce519abfd2ea45e9503ae6fb650b75bb869" \
+  "mujoco==3.16.0" "mujoco-warp==3.16.0"
 
 # 3. this package. safety_sb3 is a declared pip dependency (pinned release
 #    tag from GitHub), so one editable install pulls both:
@@ -79,14 +80,22 @@ README/PORTING.md.
   in-repo (first-class). Cfg construction and import are stock-mjlab-clean;
   SIMULATION currently needs the lab's mjlab fork for its ball-joint
   entity patch (see envs/digit_safety/builders.py) until upstreamed.
-- **mjlab version**: the zoo targets the mjlab **1.2** API. Newer mjlab
-  (1.3–1.5) has not been validated; known 1.1↔1.2 drift already required
-  compat shims once, so keep the pin unless you are prepared to re-run the
-  verification suite.
-- **The sim-stack pins are mandatory, not conservative**: unpinned
-  mujoco-warp (3.10 at time of writing) removes options mjlab 1.2.0 sets →
-  `AttributeError: ls_parallel was removed in MuJoCo Warp 3.9.1` at the first
-  env build. The pinned triple above is the validated set.
+- **mjlab version**: the zoo targets mjlab main @ `dcdf6ce5` (2026-10-31,
+  MuJoCo / MuJoCo Warp 3.16). Moving from the old mjlab 1.2.0 / MuJoCo 3.6
+  pin changes simulation results: checkpoints and eval baselines produced on
+  the old stack are not bit-for-bit reproducible here. Behavior deltas worth
+  knowing about:
+  - curriculum terrains: mjlab now uses exactly one column per sub-terrain
+    and `proportion` weights robot spawning rather than column count (affects
+    the parkour curriculum terrain, which asked for 10 columns / 5 types);
+  - `ActuatorCfg.frictionloss`/`armature` default to `None` (keep XML)
+    instead of `0.0`; Digit's actuators pin `frictionloss=0.0` to keep the
+    old dynamics;
+  - `reset(env_ids=...)` no longer advances observation history or
+    stateful commands.
+- **The sim-stack pins are mandatory, not conservative**: mjlab and
+  mujoco-warp break APIs between minor releases; the pinned set above is the
+  validated one.
 - **GPU memory**: per-task footprints scale with `--num-envs`; see the
   task docstrings. The Go2 tasks want 4–9 GB at 2–3k envs; the classic
   Robust-Gymnasium ports (feat/robust-gym-mjlab branch) are tiny (<1 GB).
