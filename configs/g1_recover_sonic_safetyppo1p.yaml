@@ -1,0 +1,56 @@
+# SafetySHAC1P vs SafetyPPO1P from scratch on SONIC's post-kick states -- the PPO arm.
+#
+#   python examples/train.py --config configs/g1_recover_sonic_safetyppo1p.yaml \
+#       --seed 0 --out runs/shac_vs_ppo_sonic/ppo_s0
+#   (the whole experiment: configs/sweeps/shac_vs_ppo_sonic/jobs.txt, then eval_jobs.txt)
+#
+# The configs/sweeps/shac_vs_ppo experiment (configs/g1_recover_selfhandover_
+# safety{shac,ppo}1p.yaml, whose headers say what the two arms share and what
+# they cannot) with two changes only:
+#   * the start states: SONIC's handover bank, data/g1_sonic_push_gfall_train_
+#     bank_net.pt (examples/harvest_g1_sonic_trajectories.py --task
+#     g1_recover_lafan: SONIC tracking LAFAN train clips, a pelvis velocity kick
+#     |dv| ~ U(0, 5) m/s, snapshots 0 / 0.1 / 0.2 / 0.3 s after it, harvested
+#     under g1_recover's own fall terminations; thinned by examples/
+#     dedup_start_bank.py at eta 0.1, which keeps ~all rows);
+#   * 1.5B env steps instead of 250M.
+# The task, margin and terminations are g1_recover's (g_fall: pelvis height,
+# tilt, non-foot contact; the episode ends at 70 deg tilt or a non-foot
+# contact), the policy the MLP 512-256-128, privileged critic, gamma 0.99.
+#
+family: on_policy        # PPO family -- the train.py router reads this
+task: g1_recover
+num_envs: 4096
+steps: 1500000000
+seed: 0
+
+env_overrides:
+  dataset: data/g1_sonic_push_gfall_train_bank_net.pt
+  weights: {handover: 1.0, nominal: 0.0, clean: 0.0, pushed: 0.0, fell: 0.0,
+            synthetic: 0.0, mocap: 0.0}
+  sampler: uniform       # handover rows drawn uniformly; no level curriculum
+  episode_length_s: 3.0
+  rest_terminate: true
+  rest_dwell_s: 0.4
+  rest_arm_s: 0.8
+
+privileged_critic: true
+gamma: 0.99
+gamma_anneal: false
+net: "512,256,128"
+action_rate_coef: 0.05
+action_mag_coef: 0.005
+
+# --- PPO recipe (= runs/g1_recover_push_fast_privcrit, also from scratch) ------
+lr: 1.0e-4
+adaptive_lr: false
+target_kl: 0.01
+ent_coef: 1.0e-3
+max_std: 0.4
+critic_warmup_steps: 0
+
+checkpoint_every: 50000000
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

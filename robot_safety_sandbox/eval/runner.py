@@ -80,6 +80,30 @@ class TwinNominal:
     return self.fallback_fn(s_obs=self.norm(obs.float()))
 
 
+class SwitchedTwinNominal:
+  """The reach-avoid-stay controller's own policies, driven as the nominal:
+  the reach twin's actor in REACH, the stay twin's in STAY -- the switched
+  counterpart of :class:`TwinNominal`.
+
+  It asks the filter which mode it is ABOUT to use (``peek``), so nominal and
+  filter agree on every step, the one where the mode flips included. The
+  fallbacks take the RAW safety observation and normalize it themselves (see
+  :func:`~robot_safety_sandbox.eval.filters.build_reach_avoid_stay_filter`).
+  """
+
+  uses_safety_obs = True
+
+  def __init__(self, filt, reach_fallback_fn, stay_fallback_fn):
+    self.filt = filt
+    self.reach_fn, self.stay_fn = reach_fallback_fn, stay_fallback_fn
+
+  def __call__(self, obs: torch.Tensor) -> torch.Tensor:
+    obs = obs.float()
+    stay = self.filt.peek(s_obs=obs)
+    return torch.where(stay.unsqueeze(-1), self.stay_fn(s_obs=obs),
+                       self.reach_fn(s_obs=obs))
+
+
 class VideoRecorder:
   """Frames from the live env, tinted by how much of the herd the filter drives.
 
@@ -147,7 +171,47 @@ def make_dstb(kind: str, env, mods: Optional[dict] = None):
       "--dstb policy needs a two-player twin to attack with: the twin at "
       f"--twin ({(mods or {}).get('twin')}) has no disturbance actor. Point "
       "--dstb-twin at a *2P checkpoint, or use --dstb random.")
+  _check_dstb_width(env, mods["dstb_fn"])
   return dstb_policy(mods["dstb_fn"])
+
+
+def _check_dstb_width(env, dstb_fn) -> None:
+  """Fail here, by name, when the twin's disturbance actor does not fit the
+  task's disturbance channel.
+
+  A 2P checkpoint carries its adversary's action width baked in, and NOTHING
+  upstream compares it to the task being evaluated: the twin loads, the filter
+  builds, the banner prints a perfectly healthy 'dim=14, mode=joint', and the
+  run dies several frames deep in the bridge on a bare tensor-shape error that
+  names neither the checkpoint nor the task. It is an easy mismatch to create --
+  a G1 wrench adversary (3 dims, a force on torso_link) and a G1 ARM adversary
+  (14 dims, the arm joints) share a robot, an observation space and a control
+  action space, and differ only here.
+
+  Probed with a zero observation rather than read off the network, because the
+  callable is a closure over whatever the twin happened to be (PPO's
+  ``dstb_policy``, SAC's ``dstb_actor``) and its output width is the only thing
+  this needs to know.
+  """
+  import torch as th
+  try:
+    obs_dim = int(env.bridge.observation_space.shape[0])
+    probe = th.zeros(1, obs_dim, device=env.device)
+    got = int(dstb_fn(s_obs=probe).shape[-1])
+  except Exception:
+    # The probe is a CONVENIENCE, never a precondition: an env surface that does
+    # not expose an observation space, or an actor that rejects a zero
+    # observation, must fall through to the real call rather than fail the run
+    # here. Only a width it actually measured is worth stopping for.
+    return
+  if got != int(env.dstb_dim):
+    raise SystemExit(
+      f"--dstb policy: the twin's disturbance actor emits {got} dims but task "
+      f"'{env.task}' has a {env.dstb_dim}-dim disturbance channel "
+      f"(mode={env.bridge.dstb_mode!r}). That checkpoint was trained against a "
+      f"different adversary, so its attack cannot be replayed here. Use "
+      f"--adversary-policy <a 2P checkpoint trained ON THIS TASK>, or "
+      f"--dstb random for an untrained attack of the right width.")
 
 
 # --- the loop ----------------------------------------------------------------
@@ -202,8 +266,10 @@ def run_eval(env, nominal, filt, metrics: Metric, *, steps: int,
     caution = (info.caution if info.caution is not None
                else torch.zeros_like(engaged))
     if no_filter:
-      if hasattr(filt.intervention, "engaged"):
-        filt.intervention.engaged.zero_()
+      # a composed filter (ReachAvoidStayFilter) has no single intervention
+      inter = getattr(filt, "intervention", None)
+      if hasattr(inter, "engaged"):
+        inter.engaged.zero_()
       filt.telemetry.reset()
       action = a_nom
       engaged = torch.zeros_like(engaged)

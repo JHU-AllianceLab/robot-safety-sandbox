@@ -61,7 +61,8 @@ the full API + CLI reference. **Start there.**
 ## Requirements
 
 **Linux + an NVIDIA GPU**, Python ≥ 3.11, and the pinned mjlab / MuJoCo-Warp sim stack. Robot assets
-(Go2, Digit), terrains, and the handover dataset ship natively in-tree. `safety_sb3` is a pinned pip
+(Go2, Digit), terrains, and the handover dataset ship natively in-tree; the G1 humanoid comes from
+mjlab's own asset zoo. `safety_sb3` is a pinned pip
 dependency. See [requirements](https://saferoboticslab.github.io/robot-safety-sandbox/getting-started/requirements/).
 
 ## Install
@@ -111,7 +112,7 @@ lookup table, no per-task override:
 
 ```
 M = Mode       Safety | ReachAvoid | Cumulative    (the Bellman operator — a property of the TASK)
-A = Algorithm  PPO | SAC | A2C | DQN               (the RL update — chosen at the RUN: --family)
+A = Algorithm  PPO | SAC | SHAC | A2C | DQN        (the RL update — chosen at the RUN: --family)
 P = Players    1P | 2P                             (single | zero-sum — chosen at the RUN: --adversary)
 ```
 

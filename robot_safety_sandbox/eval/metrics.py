@@ -690,6 +690,72 @@ class TrajectoryRecorder(Metric):
     )
 
 
+class ReachAvoidStayStats(Metric):
+  """Reach-avoid-stay outcomes, read off a ReachAvoidStayFilter's mode.
+
+    ras_reached_rate      episodes (censored ones included) that entered STAY
+    ras_time_to_stay_s    mean time from episode start to FIRST entering STAY,
+                          over the episodes that did
+    ras_stay_frac         fraction of env-steps spent in STAY
+    ras_leaves_per_reach  STAY -> REACH hand-backs per episode that reached
+    ras_hold_rate         fraction of STAY env-steps on which the stay
+                          constraint actually held on the live state (h >= 0),
+                          when ``constraint_fn`` is given -- what the STAY phase
+                          is for, measured rather than read off V_stay
+
+  :param constraint_fn: ``(mjlab env) -> (N,)`` the stay constraint h, e.g. the
+      stay task's own ``margin_fn(env)[0]``. Read after the step, so envs that
+      just ended (and were auto-reset) are left out of that step.
+  """
+
+  def __init__(self, filt, num_envs: int, device: str, dt: float,
+               constraint_fn=None):
+    self.filt, self.dt, self.constraint_fn = filt, float(dt), constraint_fn
+    self.t = torch.zeros(num_envs, device=device)
+    self.reached_ep = torch.zeros(num_envs, dtype=torch.bool, device=device)
+    self.first_t: list[torch.Tensor] = []
+    self.episodes = self.reached = self.leaves = 0
+    self.stay_steps = self.steps = 0
+    self.hold_steps = self.hold_denom = 0
+
+  def update(self, rec: StepRecord) -> None:
+    f, d = self.filt, rec.out.done
+    first = f.entered & ~self.reached_ep
+    if bool(first.any()):
+      self.first_t.append(self.t[first].clone())
+    self.reached_ep |= f.entered
+    self.leaves += int(f.left.sum())
+    self.stay_steps += int(f.mode.sum())
+    self.steps += int(f.mode.numel())
+    if self.constraint_fn is not None:
+      live = f.mode & ~d
+      if bool(live.any()):
+        h = self.constraint_fn(rec.env.mj)
+        self.hold_steps += int((h[live] >= 0.0).sum())
+        self.hold_denom += int(live.sum())
+    self.t += 1.0
+    if bool(d.any()):
+      self.episodes += int(d.sum())
+      self.reached += int((self.reached_ep & d).sum())
+      self.reached_ep &= ~d
+      self.t[d] = 0.0
+
+  def result(self) -> dict:
+    censored = self.t > 0
+    denom = max(self.episodes + int(censored.sum()), 1)
+    reached = self.reached + int((self.reached_ep & censored).sum())
+    ft = torch.cat(self.first_t) if self.first_t else None
+    return dict(
+      ras_reached_rate=reached / denom,
+      ras_time_to_stay_s=(float(ft.mean()) * self.dt if ft is not None
+                          else float("nan")),
+      ras_stay_frac=self.stay_steps / max(self.steps, 1),
+      ras_leaves_per_reach=self.leaves / max(reached, 1),
+      ras_hold_rate=(self.hold_steps / max(self.hold_denom, 1)
+                     if self.constraint_fn is not None else None),
+    )
+
+
 def protocol_metrics(env, filt, *, dt: Optional[float] = None) -> MetricSet:
   """The CBF-DDP core set, wired to one env + filter."""
   step_dt = float(dt if dt is not None else env.mj.step_dt)

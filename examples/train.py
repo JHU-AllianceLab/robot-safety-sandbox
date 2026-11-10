@@ -1,18 +1,20 @@
-"""Training entrypoint — routes to the on-policy or off-policy trainer.
+"""Training entrypoint — routes to the on-policy, off-policy or model-based trainer.
 
-The two RL families are PEERS, not a main + a variant:
+The RL families are PEERS, not a main + variants:
 
-    --family on_policy   -> train_on_policy.py   (A = PPO: {Safety,ReachAvoid}PPO{1P,2P})
-    --family off_policy  -> train_off_policy.py  (A = SAC: {Safety,ReachAvoid}SAC{1P,2P})
+    --family on_policy   -> train_on_policy.py    (A = PPO: {Safety,ReachAvoid}PPO{1P,2P})
+    --family off_policy  -> train_off_policy.py   (A = SAC: {Safety,ReachAvoid}SAC{1P,2P})
+    --family model_based -> train_model_based.py  (A = SHAC: {Safety,ReachAvoid,Cumulative}SHAC1P)
 
 The family is the MAP's **A**; the task's mode gives **M** and --adversary gives
 **P** (see robot_safety_sandbox/registry.py).
 
 The family is REQUIRED (there is no default "main" one): pass ``--family`` on the
-CLI (aliases: ``ppo`` -> on_policy, ``sac`` -> off_policy) or set ``family:`` in a
-``--config`` YAML. Every OTHER flag is forwarded verbatim to the chosen trainer,
-which owns its own argparse (run ``--family <f> --help`` to see it). Both
-trainers also remain directly runnable (``python examples/train_off_policy.py ...``).
+CLI (aliases: ``ppo`` -> on_policy, ``sac`` -> off_policy, ``shac`` -> model_based)
+or set ``family:`` in a ``--config`` YAML. Every OTHER flag is forwarded verbatim
+to the chosen trainer, which owns its own argparse (run ``--family <f> --help`` to
+see it). Every trainer also remains directly runnable
+(``python examples/train_off_policy.py ...``).
 
     python examples/train.py --family off_policy --task go2_stabilize --adversary
     python examples/train.py --family ppo        --task go2_gap_chain
@@ -28,9 +30,11 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _FAMILIES = {
   "on_policy": "train_on_policy.py",    # PPO family
   "off_policy": "train_off_policy.py",  # SAC family
+  "model_based": "train_model_based.py",  # SHAC through a learned world model
 }
 _ALIASES = {"on": "on_policy", "ppo": "on_policy",
-            "off": "off_policy", "sac": "off_policy"}
+            "off": "off_policy", "sac": "off_policy",
+            "mb": "model_based", "shac": "model_based"}
 
 
 def _family_from_config(path):
@@ -50,6 +54,7 @@ def _usage_error(msg):
     "  choose the RL family (there is no default):\n"
     "    --family on_policy   (aliases: ppo)  -> PPO family\n"
     "    --family off_policy  (aliases: sac)  -> SAC family\n"
+    "    --family model_based (aliases: shac) -> SHAC family\n"
     "  or set 'family:' in your --config YAML.\n"
     "  run  `--family <f> --help`  to see that trainer's options.\n")
   raise SystemExit(2)

@@ -40,6 +40,14 @@ on-policy (PPO) family; swap `PPO`→`SAC` for `--family off_policy`.
     A quadruped brakes or commits to a leap over a pit — the flagship reach-avoid
     pipeline. `SafetyPPO1P` · `ReachAvoidPPO1P` · `ReachAvoidPPO2P`
 
+-   ### [G1 stabilize / locomotion](g1.md) · Experimental
+
+    A Unitree G1 humanoid stays on its feet — and keeps walking at a command —
+    against a worst-case torso force, or against an adversary that commands its
+    own **arm joints** and is penalized for self-collision. The humanoid twin of
+    Go2 stabilize; new, no training result reported yet.
+    `ReachAvoidPPO1P` / `ReachAvoidPPO2P`
+
 -   ### [Digit stabilize](digit.md) · Requires custom mjlab fork
 
     ![digit](assets/digit.png){ width="300" }
@@ -61,6 +69,20 @@ crawl thread).
 | `go2_locomote` | Go2 | reach-avoid | track a velocity command vs adversarial force | ✔ | Research |
 | `go2_walker_flat` | Go2 | cumulative | dense-reward flat walker — the task policy filters wrap | — | **Stable** |
 | `go2_walker_filtered` | Go2 | cumulative | task policy trained *inside* a filter (PORL showcase) | eval only¹ | Research |
+| `g1_stabilize` | G1 | reach-avoid | stand / stay upright vs adversarial torso force | ✔ | Experimental |
+| `g1_locomote` | G1 | reach-avoid | keep walking at a velocity command vs adversarial force | ✔ | Experimental |
+| `g1_walker_flat` | G1 | cumulative | dense-reward flat humanoid walker — the task policy filters wrap | — | Experimental |
+| `g1_walker_flat_fast` | G1 | cumulative | the same walker on a faster command box, vx ∈ (-0.5, 1.5) m/s | — | Experimental |
+| `g1_stabilize_arm_adv` | G1 | reach-avoid | stand vs an adversary that commands the **arm joints** | ✔ | Experimental |
+| `g1_locomote_arm_adv` | G1 | reach-avoid | keep walking vs an adversary that commands the **arm joints** | ✔ | Experimental |
+| `g1_stabilize_arm_random` | G1 | reach-avoid | stand while the arms swing smoothly **at random** (magnitude curriculum) | — | Experimental |
+| `g1_locomote_arm_random` | G1 | reach-avoid | keep walking while the arms swing smoothly **at random** | — | Experimental |
+| `g1_stabilize_arm_random_avoid` | G1 | avoid | don't fall while the arms swing at random (no stance target) | — | Experimental |
+| `g1_recover` | G1 | avoid | fall-recovery fallback from harvested walker / pushed / synthetic starts | — | Experimental |
+| `g1_recover_arm_random` | G1 | avoid | the same, legs + waist only while the arms swing at random | — | Experimental |
+| `g1_recover_arm_random_wrench` | G1 | avoid | the same random arms plus an adversarial torso **wrench** | ✔ | Experimental |
+| `g1_waist_stay_arm_random` | G1 | avoid | reach-avoid-stay, STAY half: upright and inside a waist roll/pitch + zero-velocity goal set, arms random | — | Experimental |
+| `g1_waist_reach_arm_random` | G1 | reach-avoid | reach-avoid-stay, REACH half: reach safely where the frozen stay policy certifies, arms random | — | Experimental |
 
 The **Adversary** column: ✔ means the task supports adversarial *training*
 (`--adversary` resolves a two-player `*2P` learner). ¹`go2_walker_filtered` is
@@ -131,5 +153,7 @@ source files) followed by the research narrative. Pages for tasks that cannot
 report reproduced results on stock mjlab carry a **reduced** template —
 [Digit](digit.md) is gated behind a custom mjlab fork (it cannot be simulated on
 stock mjlab), and [Go2 crawl](go2-crawl.md) is a shelved/experimental thread with
-no clean result; both document Tasks, Margins, and Run only. GIFs are captured
+no clean result; both document Tasks, Margins, and Run only. [G1](g1.md) follows
+the full template minus the expected-result section: the environment is verified,
+but no policy has been trained on it yet. GIFs are captured
 from evaluation rollouts; see each page for the `examples/eval.py` command.

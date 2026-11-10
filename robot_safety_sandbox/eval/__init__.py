@@ -27,32 +27,34 @@ this package is specific to any environment.
 from .envs import (
   EvalEnv, StepOut, TwistCommandSurgery, build_eval_env, detect_obs_key)
 from .filters import (
-  FILTERS, FilterBundle, RolloutCfg, SwitchCfg, build_filter, build_shadow,
-  reach_avoid_reduction)
+  FILTERS, FilterBundle, RolloutCfg, SwitchCfg, build_filter,
+  build_reach_avoid_stay_filter, build_shadow, reach_avoid_reduction)
 from .metrics import (
   ActuatorJerk, CommandTracking, DistanceTravelled, Engagement, EpisodeOutcomes,
-  InterventionMass, MarginStats, Metric, MetricSet, StepRecord,
-  TrajectoryRecorder, WallClock, protocol_metrics)
+  InterventionMass, MarginStats, Metric, MetricSet, ReachAvoidStayStats,
+  StepRecord, TrajectoryRecorder, WallClock, protocol_metrics)
 from .policies import (
   find_obs_stats, load_nominal, load_twin, safety_modules, twin_class_name)
 from .presets import EvalPreset, list_presets, preset, register
 from .runner import (
-  DSTB_SOURCES, NominalPolicy, TwinNominal, VideoRecorder, ZeroNominal,
-  make_dstb, run_eval)
+  DSTB_SOURCES, NominalPolicy, SwitchedTwinNominal, TwinNominal,
+  VideoRecorder, ZeroNominal, make_dstb, run_eval)
 
 __all__ = [
   "EvalEnv", "StepOut", "TwistCommandSurgery", "build_eval_env",
   "detect_obs_key",
   "FILTERS", "FilterBundle", "SwitchCfg", "RolloutCfg", "build_filter",
   "reach_avoid_reduction",
-  "build_shadow",
+  "build_shadow", "build_reach_avoid_stay_filter",
   "Metric", "MetricSet", "StepRecord", "EpisodeOutcomes", "MarginStats",
   "ActuatorJerk", "InterventionMass", "WallClock", "Engagement",
   "DistanceTravelled", "CommandTracking", "TrajectoryRecorder",
+  "ReachAvoidStayStats",
   "protocol_metrics",
   "load_nominal", "load_twin", "twin_class_name", "safety_modules",
   "find_obs_stats",
   "EvalPreset", "register", "preset", "list_presets",
-  "NominalPolicy", "TwinNominal", "ZeroNominal", "VideoRecorder", "run_eval",
+  "NominalPolicy", "TwinNominal", "SwitchedTwinNominal", "ZeroNominal",
+  "VideoRecorder", "run_eval",
   "make_dstb", "DSTB_SOURCES",
 ]

@@ -1,0 +1,65 @@
+# SafetyPPO1P on g1_recover: M=Safety (avoid-only), A=PPO, P=1P. The G1
+# fall-recovery fallback: the actor owns all 29 joints (arms included) and must
+# not fall from the states a safety filter would hand it -- the walker mid-gait,
+# the walker just after a push, the walker a moment before it falls, synthetic
+# tilted / moving stances, and the plain stance. Keeping on jogging is allowed.
+#
+#   # 1. harvest the start-state bank (once per walker; ~15 min at 4096 envs)
+#   python examples/harvest_g1_recover_states.py \
+#       --walker runs/g1_walker_flat_fast/final_model.zip
+#   # 2. train
+#   python examples/train.py --config configs/g1_recover_safetyppo1p.yaml
+#
+# Watch Curriculum/recover/*: surv_<source> (survival per start source),
+# lvl_<source> / top_<source> (how far each source's difficulty curriculum
+# has climbed; top_* -> 1.0 = the hardest band is being survived), and
+# surv_v<lo>_<hi> (walker starts by spawn speed, m/s).
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_recover
+num_envs: 4096
+steps: 4000000000
+seed: 0
+
+# Warm start (same 29-wide head and obs): any g1_stabilize* checkpoint.
+# load: runs/g1_stabilize/final_model.zip
+
+# The spawn's knobs (envs/g1_recover/env_cfg.py); these are the defaults.
+env_overrides:
+  dataset: null          # null -> data/g1_recover_states.pt or $SAFE_ZOO_G1_RECOVER_DATASET
+  weights: {nominal: 0.15, clean: 0.35, pushed: 0.15, fell: 0.20, synthetic: 0.15}
+  levels: 5              # difficulty levels per source (0 .. levels)
+  band_width: 0.4        # each level samples this fraction of its source's sorted rows
+  init_level: 0
+  episode_length_s: 8.0
+
+gamma_anneal: true
+
+# --- safety-PPO recipe (as configs/g1_stabilize_armrandom_safetyppo1p.yaml) ---
+lr: 1.0e-4
+adaptive_lr: false
+target_kl: 0.01
+ent_coef: 1.0e-3
+max_std: 0.4
+net: "512,256,128"
+
+# --- action penalties on the PPO loss (safety_sb3) ---------------------------
+# The reward is the margin g, so action costs go on the loss instead, on the
+# policy's deterministic action mu(s), in raw action units summed over the dims:
+#   action_rate_coef  ||mu(s_t) - mu(s_{t+1})||^2   step-to-step chatter (foot bouncing)
+#   action_mag_coef   ||mu(s)||^2                   pull toward the default pose
+#                                                   (actions parked at the +-3 bound,
+#                                                   joints held against their stops)
+# Calibrated on real rollouts: each term's actor gradient is ~3-9% of the PPO
+# surrogate's on the smooth warm-start policy, and ~0.7-2x of it on the jerky
+# unregularized g1_recover* policies. Unweighted values log as
+# train/action_rate_loss / train/action_mag_loss. 0 turns a term off.
+action_rate_coef: 0.05
+action_mag_coef: 0.005
+
+# --- video: 720p, 20 s of real-time motion, written to <run>/videos/ only ---
+# Needs a GPU GL context: export MUJOCO_GL=egl (and the NVIDIA EGL vendor file,
+# see envs/velocity/g1.py) or the clip falls back to software rendering.
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

@@ -1,0 +1,92 @@
+# SafetyPPO1P on g1_recover_push_fast at a FIXED gamma 0.99: the short-horizon
+# push-recovery experiment. M=Safety (avoid-only), A=PPO, P=1P.
+#
+#   python examples/train.py --config configs/g1_recover_push_fast_safetyppo1p.yaml \
+#       --out runs/g1_recover_push_fast
+#
+# EVERY EPISODE IS ONE EVENT. The robot spawns from the recover bank (leaning
+# on the pushed / fell walker rows, init_level 2), a random horizontal push of
+# 0.2 s lands 0.1-0.4 s later at force_max x the per-env survival scale, and
+# the episode ends either at the fall or as a TRUNCATION once the robot has
+# been back in the stance set for rest_dwell_s (envs/g1_recover/rest.py), with
+# a 3 s cap. So the samples are the 1-2 s around a decision, not 6 s of
+# standing; the fall is decided within ~60 steps of the spawn, which is
+# tau*(0.99) under the tilt termination -- hence the fixed gamma and no ladder.
+#
+# THE FRONTIER is found by the per-env survival scale: force_max is held at
+# 300 N from step 0 (force_start = force_max, no ramp) and each env's scale
+# settles where it survives about half its episodes, between 60 N (floor 0.2)
+# and 300 N. game/force_scale_mean x 300 is the push the policy withstands at
+# ~50 % survival; game/force_scale_at_floor near 1 = losing even at 60 N.
+# Watch Curriculum/recover/surv_<source>, env/Episode_Termination/recovered
+# (episodes that ended at rest) vs fell_over, and rollout/ep_len_mean (should
+# sit around 1-2 s).
+#
+# For the policy's OWN frontier instead of the walker's (states captured after
+# pushes from a trained push policy, labelled by outcome), harvest a bank with
+# examples/harvest_g1_frontier_states.py and point env_overrides.dataset at it.
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_recover_push_fast
+num_envs: 4096
+steps: 500000000
+seed: 0
+
+# Warm start: the push-trained ladder run (failure rate 0.26 at ~190 N after 1B
+# steps; same head and obs). Its 4-head critic does not fit this one-head
+# learner and is dropped by the shape filter, so the critic refits at gamma
+# 0.99 from scratch while the actor is held for 20M steps. The regularized
+# all-joint recover run (runs/g1_recover_reg/g1_recover/final_model.zip, no
+# push experience) is the alternative start.
+# load: runs/g1_recover_push_ladder/g1_recover_push/final_model.zip
+critic_warmup_steps: 0
+
+# NB the avoid-trained policies survive pushes by RUNNING (median base speed
+# 1.5-1.9 m/s, angular rate ~2.4 rad/s, 0.2 % of steps inside the stance set),
+# so the rest truncation below rarely fires on them and the 3 s cap is what
+# ends a survived episode. It stays on so that a policy that does settle is
+# cut at rest; a fallback that must come to rest is the reach-avoid
+# formulation (stance_margins as the target), not a termination rule.
+
+env_overrides:
+  dataset: null          # null -> data/g1_recover_states.pt or $SAFE_ZOO_G1_RECOVER_DATASET
+  weights: {nominal: 0.10, clean: 0.20, pushed: 0.25, fell: 0.30, synthetic: 0.15}
+  levels: 5
+  band_width: 0.4
+  init_level: 2          # start partway up each source's difficulty ladder
+  episode_length_s: 3.0  # the cap: fell or at rest well before this
+  rest_terminate: true   # end (as a truncation) once back in the stance set ...
+  rest_dwell_s: 0.4      # ... for this long without a break ...
+  rest_arm_s: 0.8        # ... and never before the first push has landed
+
+# --- the push: constant ceiling, per-env survival scale finds the frontier ----
+force_max: 300.0
+force_start: 300.0       # = force_max: no ramp
+force_ramp_frac: 0.5
+force_init: 0.5          # 150 N at step 0
+force_floor: 0.2         # 60 N
+
+# --- one critic, fixed discount --------------------------------------------
+gamma: 0.99
+gamma_anneal: false
+# Asymmetric critic: the value net also sees base_lin_vel, pelvis height and the
+# feet's heights / contacts / forces (the env's "critic" group, 114 dims); the
+# actor keeps its 98. A push is mostly a velocity change, which the actor's
+# obs cannot see directly. Warm-starting from a symmetric checkpoint keeps the
+# actor but re-fits the critic stack: set critic_warmup_steps then.
+privileged_critic: true
+
+# --- safety-PPO recipe (as the warm-start run) --------------------------------
+lr: 1.0e-4
+adaptive_lr: false
+target_kl: 0.01
+ent_coef: 1.0e-3
+max_std: 0.4
+net: "512,256,128"
+
+action_rate_coef: 0.05
+action_mag_coef: 0.005
+
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

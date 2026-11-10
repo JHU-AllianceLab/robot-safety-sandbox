@@ -96,6 +96,11 @@ def _pin_twist(cfg, vx: float) -> None:
     twist.heading_command = False
     if getattr(twist.ranges, "heading", None) is not None:
       twist.ranges.heading = None
+  # The inherited "command_vel" curriculum term (mjlab's generic walker cfg)
+  # mutates these SAME ranges in place on the first env reset after step 0,
+  # silently reopening them to the full locomotion range regardless of the
+  # pin above. Remove it here so the pin actually holds for the run.
+  cfg.curriculum.pop("command_vel", None)
 
 
 def go2_stabilize_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:

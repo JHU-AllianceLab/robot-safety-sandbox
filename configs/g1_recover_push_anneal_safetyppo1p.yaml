@@ -1,0 +1,56 @@
+# SafetyPPO1P on g1_recover_push with the usual GAMMA ANNEAL -- the baseline
+# of configs/g1_recover_push_ladder_safetyppo1p.yaml. Identical task, spawn,
+# push curriculum (0 N -> 200 N over the first half of the run), warm start and
+# recipe; ONE critic whose discount steps 0.99 -> 0.999 (at 20%) -> 0.9999 (at
+# 40%), then holds (safety_sb3 StepGammaAnneal). Compare safety/failure_rate,
+# game/force_scale_mean (how much push the envs sustain at ~50% survival),
+# Curriculum/recover/surv_<source> and train/explained_variance against the
+# ladder run; the anneal's jumps show up as value-loss / EV dips.
+#
+#   python examples/train.py --config configs/g1_recover_push_anneal_safetyppo1p.yaml \
+#       --out runs/g1_recover_push_anneal
+family: on_policy        # PPO family — the train.py router reads this
+task: g1_recover_push
+num_envs: 4096
+steps: 1000000000
+seed: 0
+
+# Same warm start and critic hold as the ladder run (the anneal restarts the
+# loaded critic at 0.99, so it refits during the hold).
+load: runs/g1_recover_reg/g1_recover/final_model.zip
+critic_warmup_steps: 20000000
+
+env_overrides:
+  dataset: null
+  weights: {nominal: 0.15, clean: 0.35, pushed: 0.15, fell: 0.20, synthetic: 0.15}
+  levels: 5
+  band_width: 0.4
+  init_level: 0
+  episode_length_s: 8.0
+
+# --- the random-push curriculum (as the ladder run) ---------------------------
+force_max: 200.0
+force_start: 0.0
+force_ramp_frac: 0.5
+force_init: 0.5
+force_floor: 0.3
+
+# --- one critic, annealed ------------------------------------------------------
+gamma: 0.99              # the anneal's start
+gamma_anneal: true       # 0.99 -> 0.999 @20% -> 0.9999 @40%, hold
+
+# --- safety-PPO recipe (as the warm-start run) --------------------------------
+lr: 1.0e-4
+adaptive_lr: false
+target_kl: 0.01
+ent_coef: 1.0e-3
+max_std: 0.4
+net: "512,256,128"
+
+action_rate_coef: 0.05
+action_mag_coef: 0.005
+
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

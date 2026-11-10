@@ -1,18 +1,19 @@
 # Training configs
 
 Reusable experiment **recipes** for `examples/train.py` — the router that
-dispatches to the on-policy (PPO) or off-policy (SAC) trainer. The on-policy
-trainer then dispatches again on the TASK's `mode` (see `docs/API.md` §2): the
-safety modes get a safety_sb3 learner, `mode="cumulative"` gets stock SB3 PPO on
-the dense env reward (safety-only keys are refused there, not ignored).
+dispatches to the on-policy (PPO), off-policy (SAC) or model-based (SHAC) trainer.
+The on-policy trainer then dispatches again on the TASK's `mode` (see `docs/API.md`
+§2): the safety modes get a safety_sb3 learner, `mode="cumulative"` gets stock SB3
+PPO on the dense env reward (safety-only keys are refused there, not ignored).
 
 A recipe pins two of the MAP's three letters: **`family:`** is the **A**
-(`on_policy` = PPO, `off_policy` = SAC) and **`adversary:`** is the **P**
-(`true` = 2P). The **M** comes from the task you name. A recipe is a YAML
-file whose keys are the trainer's argparse flag names (the `dest`, e.g.
-`num_envs`, `gamma_schedule`), plus a reserved **`family:`** key
-(`on_policy` = PPO family, `off_policy` = SAC family) so the router knows which
-trainer to run — no `--family` needed on the CLI when a recipe carries it.
+(`on_policy` = PPO, `off_policy` = SAC, `model_based` = SHAC) and **`adversary:`**
+is the **P** (`true` = 2P; the model-based family has no 2P). The **M** comes from
+the task you name. A recipe is a YAML file whose keys are the trainer's argparse
+flag names (the `dest`, e.g. `num_envs`, `gamma_schedule`), plus a reserved
+**`family:`** key (`on_policy` = PPO family, `off_policy` = SAC family,
+`model_based` = SHAC family) so the router knows which trainer to run — no
+`--family` needed on the CLI when a recipe carries it.
 
 ## How it works
 
@@ -67,6 +68,16 @@ experiment registry for the narrative of what was tried and why.
 | `go2_stabilize_reachavoidppo1p.yaml` | `on_policy` | `ReachAvoidPPO1P`, the safety-PPO recipe |
 | `car_goal.yaml` | `on_policy` | `ReachAvoidPPO1P` — the car-goal tutorial recipe |
 | `go2_walker_flat.yaml` | `on_policy` | `mode: cumulative` — the dense-reward Go2 walker (pi_task) on stock SB3 PPO |
+| `g1_stabilize_reachavoidppo1p.yaml` | `on_policy` | `ReachAvoidPPO1P` — the G1 humanoid standing twin (start here on the G1) |
+| `g1_locomote_reachavoidppo1p.yaml` | `on_policy` | `ReachAvoidPPO1P` — the G1 walking-at-a-command twin |
+| `g1_walker_flat.yaml` | `on_policy` | `mode: cumulative` — the dense-reward G1 walker (pi_task) on stock SB3 PPO |
+| `g1_walker_flat_fast.yaml` | `on_policy` | `mode: cumulative` — the same G1 walker, command fixed to vx ∈ (-0.5, 1.5), vy ∈ (-0.5, 0.5) m/s from step 0 |
+| `g1_stabilize_armrandom_reachavoidppo1p.yaml` | `on_policy` | `ReachAvoidPPO1P` — the G1 standing twin while the ARM joints swing smoothly at random, magnitude ramped 0 -> 2.0 |
+| `g1_stabilize_armadv_reachavoidppo2p.yaml` | `on_policy` | `ReachAvoidPPO2P` — the G1 standing twin vs an adversary that commands the ARM joints (warm-start from the wrench-adversary run) |
+| `g1_recover_armrandom_wrench_safetyppo2p.yaml` | `on_policy` | `SafetyPPO2P` — the G1 recovery fallback with random arms vs an adversarial torso wrench (force curriculum; warm-starts from the random-arm recover run) |
+| `g1_waist_stay_armrandom_safetyppo1p.yaml` | `on_policy` | `SafetyPPO1P` — G1 reach-avoid-stay, STAY half: upright and inside a waist roll/pitch + zero-velocity goal set, arms random (goal and arm magnitude curricula). Train first |
+| `g1_waist_reach_armrandom_reachavoidppo1p.yaml` | `on_policy` | `ReachAvoidPPO1P` — G1 reach-avoid-stay, REACH half: its target is the frozen stay twin's certified set (warm-starts from the stay run) |
+| `g1_recover_safetyshac1p.yaml` | `model_based` | `SafetySHAC1P` — the G1 recovery fallback through a learned world model (BPTT of the imagined safety value), on the spawn recipe of `g1_recover_safetyppo1p.yaml`; warm-starts actor and critic from the privileged-critic push run. No pushes: the trainer refuses tasks with in-episode disturbances |
 
 Add new recipes freely. Keep **canonical** recipes here (committed); keep ad-hoc
 sweeps / scratch experiments out of the repo (they belong with the private

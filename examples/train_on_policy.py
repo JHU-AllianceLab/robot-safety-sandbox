@@ -47,15 +47,20 @@ except ImportError:
 import torch as th  # noqa: E402
 from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback  # noqa: E402
 
-from _run_config import dump_config, merge_config  # noqa: E402  (examples/ sibling)
+from _run_config import (  # noqa: E402  (examples/ sibling)
+  dump_config, merge_config, resolve_random_push)
 from robot_safety_sandbox import (  # noqa: E402
   CUMULATIVE, algo_name, list_tasks, make_tensor, spec)
 from robot_safety_sandbox.callbacks import (  # noqa: E402
+  DstbGainRampCallback,
+  DstbPhaseCallback,
   ForceRampCallback,
   FwdForceAnnealCallback,
   GaitThreshRampCallback,
   LAnnealCallback,
   PerEnvForceScaleCallback,
+  TargetScaleRampCallback,
+  CriticWarmupCallback,
   NormFreezeCallback,
   StdFloorCallback,
   TensorNormSaveCallback,
@@ -95,7 +100,21 @@ _SAFETY_ONLY = (
   "l_hold_steps", "adaptive_lr", "desired_kl", "max_std", "std_floor",
   "std_ceil", "target_kl", "reset_value", "fwd_force", "force_max",
   "force_ramp_frac", "force_floor", "force_init", "dstb_pretrain",
-  "norm_freeze_steps",
+  "dstb_gain", "dstb_gain_init", "dstb_per_env_scale", "dstb_scale_floor",
+  "dstb_scale_init", "norm_freeze_steps", "target_scale_init",
+  "target_ramp_frac",
+  # safety_sb3 loss terms; stock SB3 PPO has no such knob, and a cumulative
+  # task's dense reward already carries its own action_rate_l2 term.
+  "action_rate_coef", "action_mag_coef",
+  # multi-gamma critic heads + the gamma ladder (safety_sb3), and the force
+  # curriculum's starting magnitude
+  "gammas", "head_init", "ladder_update_every", "ladder_kappa",
+  "ladder_fail_ratio", "ladder_quantile", "ladder_min_falls",
+  "ladder_hysteresis", "force_start",
+  # the asymmetric (privileged) critic is a safety_sb3 tensor-path feature
+  "privileged_critic",
+  # ... and so is the recurrent (LSTM) policy
+  "policy", "lstm_hidden", "lstm_layers", "lstm_net",
 )
 
 
@@ -116,7 +135,8 @@ def _train_cumulative(args, outdir):
 
   from robot_safety_sandbox import make_numpy
   from robot_safety_sandbox.callbacks import (
-    DenseMetricsCallback, DenseVideoWandbCallback, VecNormSaveCallback)
+    CriticWarmupCallback, DenseMetricsCallback, DenseVideoWandbCallback,
+    VecNormSaveCallback)
 
   print(f"[algo] {args.task} mode={CUMULATIVE} -> PPO (stock stable_baselines3)")
   # numpy bridge, auto-dense for cumulative tasks (reward = the env's dense
@@ -175,19 +195,30 @@ def _train_cumulative(args, outdir):
     # per-term reward / termination breakdown (env/*) from the bridge metrics().
     DenseMetricsCallback(),
   ]
+  if args.critic_warmup_steps > 0:
+    # Same knob as the safety branch: hold the actor while a reset critic catches
+    # up. Wired here too so the flag is never a silent no-op on a cumulative run.
+    cbs.append(CriticWarmupCallback(args.critic_warmup_steps))
   if not args.no_wandb:
     import wandb
     from wandb.integration.sb3 import WandbCallback
     wandb.init(project=args.wandb_project, name=args.task, config=vars(args),
                sync_tensorboard=True, save_code=False, reinit=True)
     cbs.append(WandbCallback(verbose=0))
-    # Eval clips: a "<task>_video" packed-terrain herd variant if registered
-    # (auto-dense: no force / no safety hook -> the unaided policy).
-    _vtask = args.task + "_video"
-    _vtask = _vtask if _vtask in list_tasks() else args.task
-    cbs.append(DenseVideoWandbCallback(
-      lambda: make_tensor(_vtask, 8, args.device, render_mode="rgb_array"),
-      interval=args.video_interval))
+  # Eval clips: an mp4 per interval into <outdir>/videos/, written whether or not
+  # wandb is in use -- only the UPLOAD is conditional (--no-video-wandb, or
+  # --no-wandb). Previously this callback lived inside the wandb block, so
+  # --no-wandb silently meant "no footage at all".
+  # A "<task>_video" packed-terrain herd variant is used if registered
+  # (auto-dense: no force / no safety hook -> the unaided policy).
+  _vtask = args.task + "_video"
+  _vtask = _vtask if _vtask in list_tasks() else args.task
+  cbs.append(DenseVideoWandbCallback(
+    lambda: make_tensor(_vtask, 8, args.device, render_mode="rgb_array"),
+    interval=args.video_interval, video_seconds=args.video_seconds,
+    fps=args.video_fps, outdir=outdir,
+    to_wandb=args.video_wandb and not args.no_wandb,
+    herd=None if args.video_herd < 0 else args.video_herd))
 
   model.learn(total_timesteps=args.steps, callback=CallbackList(cbs))
   model.save(os.path.join(outdir, "final_model.zip"))   # plain SB3 zip
@@ -223,6 +254,14 @@ def main():
                  help="override an env/task cfg_builder param (repeatable), e.g. "
                       "--env-override gate_close_rate=0.003. Also settable as a "
                       "config `env_overrides:` dict. Forwarded to make_tensor.")
+  p.add_argument("--random-push", action="append", metavar="KEY=VAL", default=None,
+                 dest="random_push_override",
+                 help="override one of the task's registered random-push kwargs "
+                      "(random_push.RandomPush; repeatable, YAML values), e.g. "
+                      "--random-push max_pushes=1 --random-push "
+                      "first_delay_s=[0.1,0.4]. Also settable as a config "
+                      "`random_push:` dict. Merged onto the registration and "
+                      "passed to make_tensor; refused for a task without pushes.")
   p.add_argument("--task", required=True, help=f"one of {list_tasks()}")
   p.add_argument("--num-envs", type=int, default=2048)
   p.add_argument("--checkpoint-every", type=int, default=25_000_000, metavar="N",
@@ -275,6 +314,10 @@ def main():
                       "success (g>=0 & l>=0). 'timeout': only the env timeout.")
   p.add_argument("--adversary", action="store_true")
   p.add_argument("--force-max", type=float, default=50.0)
+  p.add_argument("--force-start", type=float, default=8.0,
+                 help="global force ramp's magnitude at step 0 (N); the ramp reaches "
+                      "--force-max at --force-ramp-frac of the run. 0 starts the "
+                      "random-push curriculum from no push at all.")
   # ISAACS game-balance knobs. The adversary force is SUSTAINED (every step),
   # so calibrate force_max to the ctrl's physical envelope (a biped's static
   # ankle authority caps sustained lateral force ~40N; go2-style 0.3x-bodyweight
@@ -290,6 +333,40 @@ def main():
   p.add_argument("--fwd-force", type=float, default=15.0,
                  help="crawl: start magnitude (N) of the forward-current force, "
                       "annealed to 0 over the run")
+  # JOINT-partition adversaries (dstb_mode="joint", e.g. g1_stabilize_arm_adv):
+  # the adversary drives a slice of the robot's OWN actuators, so there is no
+  # external wrench to bound -- force-max and the per-env force curriculum are
+  # skipped for these tasks and this gain is the authority knob instead. It is
+  # ramped over the same --force-ramp-frac of the run.
+  p.add_argument("--dstb-gain", type=float, default=None,
+                 help="joint-mode adversary: final joint authority (default: "
+                      "the task's registered dstb_gain). 1.0 = the same "
+                      "per-joint authority the actor has.")
+  p.add_argument("--dstb-gain-init", type=float, default=0.1,
+                 help="joint-mode adversary: joint authority at step 0")
+  # Per-env survival curriculum for a joint-mode adversary -- the twin of the
+  # wrench's --force-floor/--force-init. Each env's authority multiplier moves
+  # +0.05 when its episode survives and -0.05 when it fails, clamped to
+  # [floor, 1], ON TOP of the global dstb_gain ramp. ON by default;
+  # --no-dstb-per-env-scale reproduces runs made before it existed.
+  p.add_argument("--dstb-per-env-scale", action=argparse.BooleanOptionalAction,
+                 default=True,
+                 help="joint-mode adversary: per-env survival curriculum on "
+                      "its authority (default on)")
+  p.add_argument("--dstb-scale-floor", type=float, default=0.3,
+                 help="joint-mode adversary: per-env authority multiplier floor")
+  p.add_argument("--dstb-scale-init", type=float, default=0.5,
+                 help="joint-mode adversary: per-env authority multiplier at "
+                      "step 0")
+  # GOAL-magnitude curriculum, for tasks whose goal command marks itself
+  # ``ramped`` (e.g. g1_waist_*'s waist_target): its sampling range grows
+  # linearly from this fraction of the full range to all of it.
+  p.add_argument("--target-scale-init", type=float, default=0.0,
+                 help="ramped goal command: fraction of the full goal range "
+                      "sampled at step 0")
+  p.add_argument("--target-ramp-frac", type=float, default=0.5,
+                 help="ramped goal command: fraction of the run over which the "
+                      "goal range grows to its full size")
   p.add_argument("--dstb-pretrain", type=int, default=20,
                  help="2P dstb-pretrain ROLLOUTS (keep << total rollouts)")
   p.add_argument("--lr", type=float, default=5e-4)
@@ -313,6 +390,37 @@ def main():
                  default=False, help="anneal the discount 0.99->0.9999 (an HJ/SAC "
                  "safety-value device; OFF for on-policy PPO — it destabilizes the "
                  "GAE value. Set `gamma_anneal: true` in the config to enable).")
+  # Multi-gamma critic heads (safety_sb3 AbstractPPO(gammas=...)): K value heads,
+  # one per discount, all trained on every sample; the actor's advantage for an
+  # episode comes from the head the episode's REGIME names (env.regime(): spawn
+  # source x push bucket on the recover tasks), and GammaLadderCallback moves
+  # each regime to the shortest horizon that still covers its realized
+  # time-to-fall. Replaces --gamma / --gamma-anneal: a ladder has no single
+  # discount and nothing to anneal.
+  p.add_argument("--gammas", type=float, nargs="+", default=None,
+                 help="multi-gamma critic heads: a strictly increasing ladder of "
+                      "discounts, e.g. 0.9 0.99 0.995. Replaces --gamma; refuses "
+                      "--gamma-anneal. Tensor path only.")
+  p.add_argument("--head-init", type=int, default=-1,
+                 help="multi-gamma: the head every regime starts on (index into "
+                      "--gammas; -1 = the longest horizon)")
+  p.add_argument("--ladder-update-every", type=int, default=50,
+                 help="gamma ladder: rollouts between regime->head updates")
+  p.add_argument("--ladder-kappa", type=float, default=1.5,
+                 help="gamma ladder: a head must see kappa x the regime's "
+                      "time-to-fall quantile ahead")
+  p.add_argument("--ladder-fail-ratio", type=float, default=math.e,
+                 help="gamma ladder: (c - f)/c, the safe margin over the failure's "
+                      "terminal value, sets tau*(gamma) = ln(ratio)/ln(1/gamma). "
+                      "e -> tau* ~ 1/(1-gamma); the G1 tilt termination is ~1.84.")
+  p.add_argument("--ladder-quantile", type=float, default=0.9,
+                 help="gamma ladder: which quantile of a regime's time-to-fall "
+                      "is its lead time")
+  p.add_argument("--ladder-min-falls", type=int, default=20,
+                 help="gamma ladder: a regime moves only with this many logged falls")
+  p.add_argument("--ladder-hysteresis", type=float, default=0.25,
+                 help="gamma ladder: extra margin a SHORTER head must clear before "
+                      "a regime moves down to it")
   p.add_argument("--desired-kl", type=float, default=0.01,
                  help="KL target for the adaptive LR. Tight values (0.01) can "
                       "death-spiral the LR to 0 (frozen policy); loosen to "
@@ -332,16 +440,73 @@ def main():
   p.add_argument("--l-hold-steps", type=int, default=20_000_000,
                  help="hold l at LOOSE (alpha=0) this long before contracting, "
                       "so a re-inflated warm-start policy re-settles on the base")
+  p.add_argument("--privileged-critic", action=argparse.BooleanOptionalAction,
+                 default=False,
+                 help="give the VALUE net the env cfg's 'critic' observation group "
+                      "(asymmetric critic: on the G1 tasks base_lin_vel, foot "
+                      "heights / contacts / forces, and on the recover tasks the "
+                      "pelvis height); the actor and the deployed policy are "
+                      "unchanged. Single-player learners only.")
   p.add_argument("--net", default="512,256,128",
                  help="comma-separated hidden dims for pi & vf "
                       "(safety: 128,128,128)")
+  p.add_argument("--policy", choices=("mlp", "lstm"), default="mlp",
+                 help="mlp: the MLP actor-critic (--net). lstm: an LSTM memory "
+                      "per half followed by an ELU MLP (--lstm-net), the shape of "
+                      "unitree_rl_gym's recurrent G1 policy (motion.pt: LSTM 64 -> "
+                      "32 ELU). safety_sb3 RecurrentActorCriticPolicy; single "
+                      "player, no multi-gamma heads, no action penalties.")
+  p.add_argument("--lstm-hidden", type=int, default=64,
+                 help="--policy lstm: LSTM hidden size of the actor and the critic")
+  p.add_argument("--lstm-layers", type=int, default=1,
+                 help="--policy lstm: stacked LSTM layers")
+  p.add_argument("--lstm-net", default="32",
+                 help="--policy lstm: comma-separated hidden dims of the MLP after "
+                      "each LSTM (pi & vf)")
   p.add_argument("--vf-coef", type=float, default=0.5,
                  help="value loss coefficient (rsl_rl safety uses 1.0)")
+  # The safety reward IS the margin g, so action costs cannot go on the reward
+  # without changing what V certifies; these ride on the PPO loss instead, on the
+  # policy's deterministic action mu(s). Both are raw action units, summed over
+  # the action dims; the unweighted values log as train/action_rate_loss and
+  # train/action_mag_loss.
+  p.add_argument("--action-rate-coef", type=float, default=0.0,
+                 help="weight of the action-rate penalty on the PPO loss, "
+                      "||mu(s_t) - mu(s_{t+1})||^2 over consecutive steps of one "
+                      "episode (0 = off)")
+  p.add_argument("--action-mag-coef", type=float, default=0.0,
+                 help="weight of the action-magnitude penalty on the PPO loss, "
+                      "||mu(s)||^2: for a joint-position action, a pull toward the "
+                      "default pose (0 = off)")
   p.add_argument("--video-interval", type=int, default=5_000_000,
                  help="env-steps between wandb eval videos (~2k rollouts at "
                       "2560 envs); frequent clips make regressions visible early")
+  p.add_argument("--video-seconds", type=float, default=None,
+                 help="clip length in seconds of ROBOT MOTION (resolved against the "
+                      "env's control dt). Default None keeps the historical 300 frames.")
+  p.add_argument("--video-fps", type=int, default=30,
+                 help="playback rate written into the mp4. The velocity cfgs run at "
+                      "50 Hz control, so --video-fps 50 is real time; the 30 default "
+                      "is the historical 0.6x slow motion.")
+  p.add_argument("--video-wandb", action=argparse.BooleanOptionalAction, default=True,
+                 help="also upload each clip to wandb. --no-video-wandb keeps the mp4 "
+                      "local only (a 720p/20s clip is ~5-8 MB against the ~0.3 MB of a "
+                      "320x240/10s one, so a long run's media goes from ~7 MB to ~300 MB).")
+  p.add_argument("--video-herd", type=int, default=-1,
+                 help="how many NEIGHBOR envs to draw beside the tracked one. -1 (default) "
+                      "draws them all, as before; 0 renders a single robot, which is only "
+                      "worth reaching for on a SOFTWARE GL context (see --video-seconds "
+                      "notes in docs/reference/cli.md: on a GPU context a 720p frame is "
+                      "~1 ms and none of this matters).")
   p.add_argument("--norm-freeze-steps", type=int, default=5_000_000,
                  help="freeze obs-norm updates at the start of WARM-STARTED runs")
+  p.add_argument("--critic-warmup-steps", type=int, default=0,
+                 help="freeze the ACTOR for the first N env-steps so a reset critic "
+                      "(--reset-value) fits the inherited policy before any policy "
+                      "gradient is taken. The actor keeps ACTING -- only its weights "
+                      "and log_std are held -- so the value net learns V^pi on-policy. "
+                      "0 (default) = off. Watch train/explained_variance: past ~0.7 the "
+                      "critic is tracking returns. Warm-started runs only.")
   p.add_argument("--device", default="cuda:0")
   p.add_argument("--out", default=os.path.join(_ZOO, "runs"),
                  help="output root; ALWAYS keep runs under runs/ (git-ignored) — "
@@ -353,6 +518,11 @@ def main():
   args = merge_config(p)   # parse args; an optional --config sets defaults, CLI overrides
 
   s = spec(args.task)
+  # The task's random-push kwargs with the run's random_push: overrides on top
+  # (None = no overrides: the env is built from the registration as always).
+  # Resolved before any output exists, so a bad key fails the run at once.
+  push_kw = resolve_random_push(args.task, s.kwargs.get("random_push"),
+                                args.random_push)
   if s.mode == CUMULATIVE:
     # Safety knobs are refused here, never silently applied: this mode
     # maximizes the env's dense reward and has neither margins nor a target set.
@@ -394,9 +564,28 @@ def main():
       f"'{algo}' learner, which this safety_sb3 does not export.")
   print(f"[algo] {args.task} adversary={args.adversary} -> {algo}")
 
+  # Privileged critic: the bridge surfaces the cfg's "critic" group and the 1P
+  # learner builds the asymmetric value net from it (safety_sb3 auto-detects).
+  # The two-player loop has no asymmetric path, so refuse rather than ignore.
+  pkw = {}
+  if args.privileged_critic:
+    if args.adversary:
+      raise SystemExit("[critic] --privileged-critic is single-player only: the "
+                       "two-player PPO loop has no asymmetric critic.")
+    pkw["critic_obs_key"] = "critic"
+  if push_kw is not None:
+    pkw["random_push"] = push_kw
   env = make_tensor(args.task, args.num_envs, args.device,
                     adversary=args.adversary, end_criterion=args.end_criterion,
-                    cfg_overrides=args.env_overrides)
+                    cfg_overrides=args.env_overrides, **pkw)
+  if s.kwargs.get("random_push") is not None:
+    _src = (f"registration + overrides {args.random_push}" if push_kw
+            else "task registration")
+    print(f"[random-push] kwargs {push_kw or s.kwargs['random_push']} ({_src})")
+  if args.privileged_critic:
+    print(f"[critic] privileged: value net reads the '{env.critic_obs_key}' group "
+          f"({env.critic_observation_space.shape[0]} dims) vs the actor's "
+          f"{env.observation_space.shape[0]}")
   eff_ec = args.end_criterion if args.end_criterion is not None else s.end_criterion
   print(f"[end-criterion] {args.task} -> {eff_ec}"
         f"{' (override)' if args.end_criterion is not None else ' (task default)'}")
@@ -410,6 +599,14 @@ def main():
   elif args.terminal_type != "all":
     print(f"[terminal-type] ignored: {algo} is an avoid learner (no target "
           f"set), so --terminal-type {args.terminal_type} has no effect.")
+  # Action penalties on the PPO loss (safety_sb3 action_rate_coef /
+  # action_mag_coef). Passed only when set, so a safety_sb3 that predates them
+  # still trains every run that leaves them off.
+  if args.action_rate_coef or args.action_mag_coef:
+    akw.update(action_rate_coef=args.action_rate_coef,
+               action_mag_coef=args.action_mag_coef)
+    print(f"[action-penalty] rate={args.action_rate_coef} "
+          f"mag={args.action_mag_coef} (on the deterministic action)")
   if args.adversary:  # full two-player game, tensor path
     akw.update(dict(ctrl_action_dim=s.ctrl_dim,
                dstb_learning_rate=3e-4, dstb_ent_coef=2e-3,  # reference values
@@ -418,11 +615,44 @@ def main():
                use_leaderboard=True,
                leaderboard_dir=os.path.join(outdir, "leaderboard")))
 
+  # Multi-gamma critic heads: the ladder replaces the single discount (the
+  # learner refuses gamma= beside gammas=) and there is nothing to anneal.
+  gamma_kw = dict(gamma=args.gamma)
+  if args.gammas:
+    if args.gamma_anneal:
+      raise SystemExit(
+        "[multi-gamma] gammas and gamma_anneal are exclusive: the ladder holds every "
+        "horizon at once. Set `gamma_anneal: false` (or drop gammas).")
+    if not hasattr(_safety_sb3, "GammaLadderCallback"):
+      raise SystemExit(
+        "[multi-gamma] this safety_sb3 has no multi-gamma support (gammas / "
+        "GammaLadderCallback); update safety-stable-baselines.")
+    gamma_kw = {}
+    akw.update(gammas=[float(g) for g in args.gammas], head_init=args.head_init)
+    print(f"[multi-gamma] critic heads at gammas={args.gammas}; every regime starts "
+          f"on head {args.head_init}; env.n_regimes={getattr(env, 'n_regimes', 1)}")
+
   net = [int(x) for x in args.net.split(",") if x.strip()]
+  pkw = dict(log_std_init=math.log(0.3), net_arch=dict(pi=net, vf=net))
+  policy_name = "MlpPolicy"
+  if args.policy == "lstm":
+    if args.adversary:
+      raise SystemExit("[policy] --policy lstm is single-player only")
+    if not hasattr(_safety_sb3, "RecurrentActorCriticPolicy"):
+      raise SystemExit("[policy] this safety_sb3 has no RecurrentActorCriticPolicy; "
+                       "update safety-stable-baselines")
+    import torch.nn as _nn
+    net = [int(x) for x in args.lstm_net.split(",") if x.strip()]
+    policy_name = "LstmPolicy"
+    pkw = dict(log_std_init=math.log(0.3), net_arch=dict(pi=net, vf=net),
+               activation_fn=_nn.ELU, lstm_hidden=args.lstm_hidden,
+               lstm_layers=args.lstm_layers)
+    print(f"[policy] LSTM actor-critic: obs -> LSTM({args.lstm_hidden} x "
+          f"{args.lstm_layers}) -> ELU MLP {net} (actor and critic each)")
   model = Algo(
-    "MlpPolicy", env, **akw,
+    policy_name, env, **akw, **gamma_kw,
     n_steps=args.n_steps, batch_size=args.num_envs * args.n_steps // 4, n_epochs=5,
-    gamma=args.gamma, gae_lambda=0.95, learning_rate=args.lr,
+    gae_lambda=0.95, learning_rate=args.lr,
     # gamma anneal (-> 0.9999) is an HJ/SAC safety-VALUE device; on PPO's GAE
     # value it makes the target near-undiscounted and the value net can diverge
     # (car_goal E064: value_loss -> 1e5, EV < 0 once gamma reached ~1). Default
@@ -432,8 +662,7 @@ def main():
     max_grad_norm=1.0, normalize_obs=True,
     adaptive_lr=args.adaptive_lr,
     desired_kl=args.desired_kl if args.adaptive_lr else None,
-    policy_kwargs=dict(log_std_init=math.log(0.3),
-                       net_arch=dict(pi=net, vf=net)),
+    policy_kwargs=pkw,
     seed=args.seed, verbose=1, device=args.device,
     tensorboard_log=outdir)
   print(f"[recipe] net={net} ent_coef={args.ent_coef} "
@@ -464,6 +693,24 @@ def main():
       start=args.fwd_force, hold_steps=int(0.13 * args.steps),
       anneal_steps=int(0.54 * args.steps)))
     cbs.append(GaitThreshRampCallback())  # trot-threshold curriculum
+
+  if args.critic_warmup_steps > 0:
+    # Ordered BEFORE the run so the freeze is in place from the first rollout.
+    cbs.append(CriticWarmupCallback(args.critic_warmup_steps))
+
+  if args.gammas:
+    # The slow loop of the ladder: every ladder_update_every rollouts each regime
+    # with enough logged falls moves to the shortest head whose tau* covers
+    # kappa x its time-to-fall quantile. Logs ladder/* (head per regime, T_r).
+    cbs.append(_safety_sb3.GammaLadderCallback(
+      update_every=args.ladder_update_every, kappa=args.ladder_kappa,
+      fail_ratio=args.ladder_fail_ratio, quantile=args.ladder_quantile,
+      min_falls=args.ladder_min_falls, hysteresis=args.ladder_hysteresis,
+      verbose=1))
+    print(f"[multi-gamma] ladder: update every {args.ladder_update_every} rollouts, "
+          f"kappa={args.ladder_kappa}, fail_ratio={args.ladder_fail_ratio:.3g}, "
+          f"q={args.ladder_quantile}, min_falls={args.ladder_min_falls}, "
+          f"hysteresis={args.ladder_hysteresis}")
 
   if args.target_kl is not None:
     model.target_kl = args.target_kl
@@ -500,6 +747,13 @@ def main():
     _pre = {n: p.detach().clone() for n, p in _actor_named_params(model.policy).items()}
     _, _wl_params, _ = _load_zip(args.load, device=args.device)
     _wl_src = _wl_params.get("policy", {})
+    _wl_k = int(getattr(model.policy, "n_value_heads", 1))
+    if _wl_k > 1:
+      # A one-head checkpoint's value_net is [1, H]; copy the fitted critic into
+      # every head so the ladder starts from it instead of K cold heads (the
+      # shape filter below would otherwise drop it).
+      _wl_src = _safety_sb3.tile_value_head(_wl_src, _wl_k)
+      print(f"[warm-start] single-head value_net tiled into {_wl_k} critic heads")
     _wl_tgt = model.policy.state_dict()
     _wl_compat = {k: v for k, v in _wl_src.items()
                   if k in _wl_tgt and _wl_tgt[k].shape == v.shape}
@@ -527,6 +781,17 @@ def main():
       # orthogonal gain sqrt(2) (extractor) / 1.0 (head).
       if hasattr(pol.mlp_extractor, "value_net"):
         pol.mlp_extractor.value_net.apply(partial(pol.init_weights, gain=math.sqrt(2)))
+      # An asymmetric (privileged) critic reads its OWN stack, critic_mlp_extractor
+      # (safety_sb3.policies_asym); mlp_extractor's value branch is then unused,
+      # so without this only the head would be reset and the hidden layers of the
+      # source critic would carry over.
+      cme = getattr(pol, "critic_mlp_extractor", None)
+      if cme is not None:
+        cme.value_net.apply(partial(pol.init_weights, gain=math.sqrt(2)))
+      # A recurrent critic's memory is value pathway too.
+      mem = getattr(pol, "memory_c", None)
+      if mem is not None:
+        mem.reset_parameters()
       pol.value_net.apply(partial(pol.init_weights, gain=1.0))
       # Fresh optimizer moments: stale Adam second-moments on the just-reset value
       # params would produce a huge effective first step and re-explode the value.
@@ -557,6 +822,20 @@ def main():
         st["obs_mean"].to(tvn.device), st["obs_var"].to(tvn.device),
         st["count"].to(tvn.device))
       print(f"[warm-start] {args.load} + tensor obs stats ({os.path.basename(pt)})")
+      # The privileged critic's normalizer is a SECOND set of stats in the same
+      # file. Without it a loaded asymmetric critic reads raw inputs, and
+      # NormFreezeCallback (training=False) holds them raw for norm_freeze_steps.
+      if getattr(tvn, "critic_observation_space", None) is not None:
+        if ("critic_obs_mean" in st
+            and st["critic_obs_mean"].shape == tvn.critic_obs_mean.shape):
+          tvn.critic_obs_mean, tvn.critic_obs_var, tvn.critic_count = (
+            st["critic_obs_mean"].to(tvn.device), st["critic_obs_var"].to(tvn.device),
+            st["critic_count"].to(tvn.device))
+          print(f"[warm-start] + critic obs stats ({tvn.critic_obs_mean.numel()} dims)")
+        else:
+          print(f"[warm-start] WARNING: no matching critic obs stats in "
+                f"{os.path.basename(pt)}; the privileged critic's normalizer starts "
+                f"fresh and stays frozen for {args.norm_freeze_steps} steps")
     elif pkl:
       import pickle
       with open(pkl, "rb") as f:
@@ -574,14 +853,84 @@ def main():
         f"vecnormalize.pkl) beside the checkpoint.")
     cbs.append(NormFreezeCallback(args.norm_freeze_steps))
 
+  def _joint_authority_curriculum(tag):
+    # A joint-partition disturbance -- a learned adversary, or the scripted
+    # random arms of a joint_noise task -- is bounded by its joint authority
+    # dstb_gain (for joint_noise: the random motion's MAGNITUDE). Same two
+    # levers for both, since the bridge applies both through one code path.
+    gmax = args.dstb_gain if args.dstb_gain is not None else float(
+      s.kwargs.get("dstb_gain", 1.0))
+    cbs.append(DstbGainRampCallback(gmax,
+                                    int(args.force_ramp_frac * args.steps),
+                                    gain_start=args.dstb_gain_init))
+    lo, hi = s.kwargs["dstb_joint_slice"]
+    print(f"[{tag}] joint-partition: dims {lo}..{hi - 1} of "
+          f"{s.ctrl_dim}; authority ramp {args.dstb_gain_init}->{gmax} over "
+          f"{args.force_ramp_frac:.0%}")
+    if args.dstb_per_env_scale:
+      # The anti-collapse lever the wrench game gets from force_scale: the
+      # disturbance weakens in envs where the robot keeps failing, so the actor
+      # keeps seeing survivable episodes once the global ramp saturates.
+      cbs.append(PerEnvForceScaleCallback(lo=args.dstb_scale_floor,
+                                          init=args.dstb_scale_init,
+                                          name="dstb_scale"))
+      print(f"[{tag}] per-env authority scale: floor="
+            f"{args.dstb_scale_floor} init={args.dstb_scale_init} "
+            f"(effective authority = ramp x per-env scale)")
+    else:
+      print(f"[{tag}] per-env authority scale: OFF (global ramp only)")
+
   if args.adversary:
+    # The adversary's CHANNEL decides which curriculum it gets. A "wrench"
+    # adversary is bounded by a force in newtons; a "joint" one owns a slice of
+    # the robot's own actuators and is bounded by its joint authority instead --
+    # force_max and the per-env force scale are never read in that mode, so
+    # attaching their callbacks would only print a curriculum that does nothing.
+    if s.kwargs.get("dstb_mode") == "joint":
+      _joint_authority_curriculum("adversary")
+    else:
+      cbs.append(ForceRampCallback(args.force_max,
+                                   int(args.force_ramp_frac * args.steps),
+                                   force_start=args.force_start))
+      cbs.append(PerEnvForceScaleCallback(lo=args.force_floor,
+                                          init=args.force_init))
+      print(f"[adversary] force ramp {args.force_start:g}->{args.force_max}N over "
+            f"{args.force_ramp_frac:.0%}; per-env scale floor={args.force_floor} "
+            f"init={args.force_init}")
+    # Opens the per-player margin channel: the env learns which player is
+    # collecting, so a task can penalize the DISTURBANCE for something the
+    # control player must not be paid for (g1_arm_adversary's self-collision).
+    # A no-op for every task whose margin_fn ignores _zoo_dstb_phase.
+    cbs.append(DstbPhaseCallback())
+  elif s.kwargs.get("random_push") is not None:
+    # Scripted random pushes (random_push.RandomPush) ride the wrench adversary's
+    # channel, so they get its two curricula: the global ramp force_start ->
+    # force_max over force_ramp_frac of the run, times the per-env survival
+    # scale (each env settles where it survives about half its episodes).
     cbs.append(ForceRampCallback(args.force_max,
-                                 int(args.force_ramp_frac * args.steps)))
+                                 int(args.force_ramp_frac * args.steps),
+                                 force_start=args.force_start))
     cbs.append(PerEnvForceScaleCallback(lo=args.force_floor,
                                         init=args.force_init))
-    print(f"[adversary] force ramp 8->{args.force_max}N over "
+    print(f"[random-push] force ramp {args.force_start:g}->{args.force_max}N over "
           f"{args.force_ramp_frac:.0%}; per-env scale floor={args.force_floor} "
-          f"init={args.force_init}")
+          f"init={args.force_init} (push = ramp x per-env scale, "
+          f"{(push_kw or s.kwargs['random_push']) or 'default timing'})")
+  if s.kwargs.get("joint_noise") is not None:
+    # The joint slice is driven by the bridge's random process (e.g.
+    # g1_stabilize_arm_random): its magnitude gets the joint adversary's
+    # curriculum, ramping from --dstb-gain-init up to the task's registered
+    # dstb_gain (or --dstb-gain). Not an elif: a WRENCH adversary may play on
+    # top (g1_recover_arm_random_wrench), and then both curricula run -- the
+    # force on force_max/force_scale, the arms on dstb_gain/dstb_scale.
+    _joint_authority_curriculum("random-joints")
+  for _name in env.mj.command_manager.active_terms:
+    if getattr(env.mj.command_manager.get_term(_name), "ramped", False):
+      cbs.append(TargetScaleRampCallback(
+        _name, int(args.target_ramp_frac * args.steps),
+        scale_start=args.target_scale_init))
+      print(f"[curriculum] goal '{_name}': range {args.target_scale_init:g}->1 "
+            f"of full over {args.target_ramp_frac:.0%}")
 
   if not args.no_wandb:
     import wandb
@@ -589,15 +938,26 @@ def main():
     wandb.init(project=args.wandb_project, name=tag, config=vars(args),
                sync_tensorboard=True, save_code=False, reinit=True)
     cbs.append(WandbCallback(verbose=0))
-    # Use a "<task>_video" packed-terrain herd variant for the eval clip if one
-    # is registered (crawl spreads envs ~24 m -> a herd needs packed patches).
-    _vtask = args.task + "_video"
-    _vtask = _vtask if _vtask in list_tasks() else args.task
-    cbs.append(VideoWandbCallback(
-      lambda: make_tensor(_vtask, 8, args.device, adversary=False,
-                          render_mode="rgb_array",  # native herd, one scene
-                          end_criterion=args.end_criterion),
-      interval=args.video_interval))
+  # Eval clips: an mp4 per interval into <outdir>/videos/, written whether or not
+  # wandb is in use -- only the UPLOAD is conditional (--no-video-wandb, or
+  # --no-wandb). Previously this callback lived inside the wandb block, so
+  # --no-wandb silently meant "no footage at all".
+  # A "<task>_video" packed-terrain herd variant is used if registered (crawl
+  # spreads envs ~24 m -> a herd needs packed patches).
+  _vtask = args.task + "_video"
+  _vtask = _vtask if _vtask in list_tasks() else args.task
+  # The clip env pushes the way the training env does (the callback mirrors
+  # force_max / force_scale onto it); push overrides only exist for args.task.
+  _vkw = ({"random_push": push_kw}
+          if push_kw is not None and _vtask == args.task else {})
+  cbs.append(VideoWandbCallback(
+    lambda: make_tensor(_vtask, 8, args.device, adversary=False,
+                        render_mode="rgb_array",  # native herd, one scene
+                        end_criterion=args.end_criterion, **_vkw),
+    interval=args.video_interval, video_seconds=args.video_seconds,
+    fps=args.video_fps, outdir=outdir,
+    to_wandb=args.video_wandb and not args.no_wandb,
+    herd=None if args.video_herd < 0 else args.video_herd))
 
   model.learn(total_timesteps=args.steps, callback=CallbackList(cbs))
   model.save(os.path.join(outdir, "final_model.zip"))

@@ -123,6 +123,10 @@ class EvalEnv:
               scale, in the attack direction the adversary chose.
       action  the disturbance is added to the control (ctrl += dstb_gain *
               a_dstb), so the knob is the action magnitude itself.
+      joint   the disturbance IS a joint command on the actuators it owns
+              (g1_*_arm_adv: the arms), so — as for "action" — the knob is the
+              action magnitude. scale=0 parks those joints at their default
+              pose, which is exactly the 1P baseline for those tasks.
 
     scale=1.0 reproduces the task's own training-time attack; 0.0 disables it
     while keeping the two-player action space intact.

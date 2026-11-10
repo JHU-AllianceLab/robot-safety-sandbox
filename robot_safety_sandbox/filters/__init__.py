@@ -34,6 +34,12 @@ monitor to a full adversarial rollout swaps exactly one of the three modules.
 That is the whole point of the decomposition, and it is load-bearing — if a new
 monitor ever needs the intervention edited, the interface is wrong.
 
+One composition sits a level above the triples: :class:`~.switch.
+ReachAvoidStayFilter` holds TWO of them — a reach-avoid filter and an avoid
+filter on the stay constraint — and a latched per-env mode between them,
+switched on the stay certificate. That is reach-avoid-stay, which neither
+filter certifies on its own.
+
 ``LeastRestrictive`` above means the CANONICAL rule and nothing else: pass the
 nominal iff ``Delta(x, u) > eps``, hand over entirely otherwise, with no state
 carried between steps. Every switching builder takes ``smoothing=True`` to
@@ -63,6 +69,7 @@ from .monitor import (
   AdversarialRolloutMonitor, CriticMonitor, Monitor, RolloutMonitor,
   ValueMonitor)
 from .rollout import MjlabShadowSim, RolloutStep, ShadowSim, sync_env_state
+from .switch import ReachAvoidStayFilter
 from .telemetry import EngagementLog, FilterInfo
 
 __all__ = [
@@ -75,6 +82,7 @@ __all__ = [
   "ShadowSim", "MjlabShadowSim", "RolloutStep", "sync_env_state",
   "safety_value_filter", "safety_critic_filter", "qcbf_filter",
   "rollout_filter", "gameplay_filter",
+  "ReachAvoidStayFilter",
 ]
 
 

@@ -39,7 +39,7 @@ alongside the primary public tasks — read the maturity column in the
 | **Tutorial** | Small, fully documented entry point | `car_goal` |
 | **Stable** | Reproduced, recommended | `go2_stabilize`, `go2_walker_flat` |
 | **Research** | Shipped result, needs staged training / real scale | `go2_gap_*` family |
-| **Experimental** | Shelved or in progress; may not reproduce | `go2_crawl_*`, `go2_low_bar_*`, `go2_tunnel_*` |
+| **Experimental** | Shelved or in progress; may not reproduce | `g1_*` (new), `go2_crawl_*`, `go2_low_bar_*`, `go2_tunnel_*` |
 | **Requires custom mjlab fork** | Imports on stock mjlab, needs a fork to simulate | `digit_*` |
 
 ## Known limitations

@@ -5,14 +5,14 @@ by `--help`; run `python examples/<script>.py --help` (and, for the trainers,
 `python examples/train.py --family <f> --help`) for the complete, authoritative
 list. The tables below are curated, not generated.
 
-!!! note "One trainer, two families"
-    `examples/train.py` is a router: it needs a `--family` (`on_policy`/`ppo` or
-    `off_policy`/`sac`, or a `family:` key in the config) and forwards all other
-    flags to the chosen trainer. See [training](../guide/training.md).
+!!! note "One trainer, three families"
+    `examples/train.py` is a router: it needs a `--family` (`on_policy`/`ppo`,
+    `off_policy`/`sac` or `model_based`/`shac`, or a `family:` key in the config) and
+    forwards all other flags to the chosen trainer. See [training](../guide/training.md).
 
-## Training — `train.py` / `train_on_policy.py` / `train_off_policy.py`
+## Training — `train.py` / `train_on_policy.py` / `train_off_policy.py` / `train_model_based.py`
 
-### Common (both families)
+### Common (all families)
 
 | flag | meaning |
 |---|---|
@@ -22,7 +22,7 @@ list. The tables below are curated, not generated.
 | `--num-envs N` | parallel environments |
 | `--steps N` | total env-steps |
 | `--seed N` | random seed |
-| `--adversary` | two-player run (the MAP's **P**) |
+| `--adversary` | two-player run (the MAP's **P**); not on the model-based trainer |
 | `--end-criterion {failure,reach-avoid,timeout}` | override the task default |
 | `--terminal-type {all,g}` | reach-avoid learners only |
 | `--net NET` | comma-separated hidden dims |
@@ -40,9 +40,15 @@ list. The tables below are curated, not generated.
 | `--adaptive-lr` / `--no-adaptive-lr`, `--desired-kl` | KL-adaptive learning rate |
 | `--gamma`, `--gamma-anneal` / `--no-gamma-anneal` | discount + anneal (anneal OFF for PPO by default) |
 | `--std-floor` / `--std-ceil` / `--reset-log-std` / `--max-std` | action-std control |
+| `--action-rate-coef` / `--action-mag-coef` | action penalties on the PPO loss, on the deterministic action μ(s): rate ‖μ(s_t) − μ(s_{t+1})‖² and magnitude ‖μ(s)‖² (`0` = off, the default). Safety tasks only; unweighted values log as `train/action_rate_loss` / `train/action_mag_loss` |
 | `--l-anneal-steps` / `--l-hold-steps` | reach-set curriculum for warm-started reach-avoid |
+| `--target-scale-init` / `--target-ramp-frac` | goal-magnitude curriculum for a task whose goal command is `ramped` (e.g. `g1_waist_*`): the goal range grows linearly from this fraction of full to all of it over this fraction of the run (defaults 0 and 0.5); logs `curriculum/<term>_scale` |
 | `--norm-freeze-steps` | freeze obs-norm at the start of warm-started runs |
-| `--video-interval N` | env-steps between wandb eval videos |
+| `--video-interval N` | env-steps between eval clips (`0` disables them, and skips building the render env) |
+| `--video-seconds S` | clip length in seconds of robot motion (resolved against the env's control dt); default keeps the historical 300 frames |
+| `--video-fps N` | playback rate written into the mp4. The velocity cfgs run 50 Hz control, so `50` is real time; the `30` default is 0.6x slow motion |
+| `--video-wandb` / `--no-video-wandb` | also upload each clip to wandb. The mp4 is written to `<run>/videos/step_<N>.mp4` either way |
+| `--video-herd N` | neighbour envs drawn beside the tracked one; `-1` (default) draws them all, `0` renders a single robot (~2x faster **on a software GL context** — on a GPU context a 720p frame is ~1 ms and this does not matter; see the render-backend warning in [G1 stabilize](../environments/g1.md#video-clips)) |
 
 !!! warning "`--smoke` is off-policy only"
     There is **no `--smoke` on the on-policy trainer.** Shrink a PPO run with
@@ -64,6 +70,30 @@ list. The tables below are curated, not generated.
 | `--leaderboard-freq` / `--leaderboard-episodes` / `--leaderboard-eval-envs` | throughput league |
 | `--force-max` / `--force-ramp-frac` / `--force-floor` / `--force-init` | adversary force schedule |
 
+### Model-based (SHAC)
+
+| flag | meaning |
+|---|---|
+| `--load LOAD` | warm-start `.zip`: a `SafetyPPO1P` checkpoint (actor + critic) or a SHAC one (+ world model) with matching net shapes; the obs normalizer is read next to it |
+| `--norm-freeze-steps` | freeze obs-norm at the start of warm-started runs |
+| `--wm-warmup-iters` / `--actor-delay-iters` | iterations that fit only the world model, then iterations that fit the critic but hold the actor (for warm starts) |
+| `--actor-lr-warmup-iters` | ramp the actor LR linearly from 0 over its first N updates (default `0` = off) |
+| `--privileged-critic` / `--no-privileged-critic` | the env's `critic` obs group as the world-model state and critic input (ON by default) |
+| `--gamma`, `--gamma-anneal` / `--no-gamma-anneal` | discount + anneal (anneal OFF by default) |
+| `--gae-lambda` | λ of the critic's nested lambda-return |
+| `--softmin-tau` | soft-min temperature of the actor objective, in margin units (`0` = the exact min) |
+| `--action-rate-coef` / `--action-mag-coef` / `--action-bound-coef` | actor-loss penalties over the imagined actions, in value units; the bound term (default `1`) pulls the actor mean back inside the action box |
+| `--wm-net` / `--wm-head-net` | hidden dims of the dynamics network and of the margin / termination head (`--net` sets the actor and critic; match a PPO checkpoint to warm-start both) |
+| `--lr` / `--critic-lr` / `--wm-lr`, `--lr-decay-iters`, `--lr-min-frac` | learning rates and their cosine decay |
+| `--horizon`, `--imagine-batch` | imagined steps H, imagined rollouts per actor update |
+| `--action-noise-std` | Gaussian collection noise on the actor's action |
+| `--replay-size`, `--learning-starts`, `--utd-ratio` | replay / update budget |
+| `--wm-window`, `--wm-batch`, `--wm-gradient-steps` | the k-step world-model fit |
+| `--critic-epochs` / `--critic-minibatches` | the critic fit on each imagined batch |
+| `--checkpoint-every N` | env-steps between checkpoints (model, world model and obs normalizer) |
+| `--tf32` / `--no-tf32`, `--log-interval` | TF32 matmuls; iterations per log dump |
+| `--video-interval` / `--video-seconds` / `--video-fps` / `--video-wandb` / `--video-herd` | eval clips, as on the on-policy trainer |
+
 ## Evaluation — `eval.py`
 
 Four axes chosen independently (see [evaluation](../guide/evaluation.md)).
@@ -74,6 +104,7 @@ Four axes chosen independently (see [evaluation](../guide/evaluation.md)).
 | `--task-policy PATH` | the `π_task` checkpoint being filtered (omit for fallback-only) |
 | `--safety-only` | use the safety policy's own control actor as the task policy |
 | `--safety-policy PATH` | the safety-policy checkpoint (certificate + fallback) |
+| `--stay-policy PATH` (+ `--stay-eps-in` / `--stay-eps-out` / `--stay-task`) | reach-avoid-stay: `--safety-policy` is the reach-avoid twin, this the stay twin; a latched mode hands over when V_stay > eps-in (0.1) and back when V_stay ≤ eps-out (0.0). Needs `--filter value`; turns command surgery off; adds the `ras_*` metrics |
 | `--task-obs-key` / `--safety-obs-key` | override an obs group (auto-detected by default) |
 | `--filter {value,critic,qcbf,rollout,gameplay}` / `--no-filter` | the filter composition, or the control arm |
 | `--eps` | switching threshold (hand over when the monitored margin ≤ eps) |
@@ -98,7 +129,7 @@ Load a checkpoint and drive it in a viewer.
 | flag | meaning |
 |---|---|
 | `--task TASK` | the task |
-| `--algo {SafetyPPO1P,…,ReachAvoidSAC2P,PPO}` | the MAP name the checkpoint was trained as |
+| `--algo {SafetyPPO1P,…,ReachAvoidSAC2P,…,CumulativeSHAC1P,PPO}` | the MAP name the checkpoint was trained as |
 | `--run RUN` | run dir holding `final_model.zip` + its obs normalizer — `tensornormalize.pt` (tensor path) or `vecnormalize.pkl` (cumulative on-policy / stock SB3); `play.py` auto-detects whichever is present |
 | `--load LOAD` | explicit model `.zip` (overrides `--run`) |
 | `--adversary` | two-player checkpoints: also drive the learned disturbance |

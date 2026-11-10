@@ -1,26 +1,30 @@
 # Training
 
-One router, two peer RL families. `examples/train.py` dispatches to the on-policy
-or off-policy trainer by a **required `--family`** — neither is the "main" one;
-they are the [MAP](../concepts/map.md)'s two wired-up **A** values, and both
+One router, three peer RL families. `examples/train.py` dispatches to the on-policy,
+off-policy or model-based trainer by a **required `--family`** — none is the "main"
+one; they are the [MAP](../concepts/map.md)'s three wired-up **A** values, and all
 resolve the learner the same way: the task's `mode` × `--adversary`.
 
 | `--family` | trainer | the MAP's **A** | learners |
 |---|---|---|---|
 | `on_policy` (alias `ppo`) | `examples/train_on_policy.py` | `PPO` | `{Safety,ReachAvoid}PPO{1P,2P}`, plus **stock SB3 `PPO`** for `cumulative` (numpy bridge, plain SB3 zip) |
 | `off_policy` (alias `sac`) | `examples/train_off_policy.py` | `SAC` | `{Safety,ReachAvoid}SAC{1P,2P}`, plus `safety_sb3.CumulativeSAC1P` for `cumulative` (tensor path; SB3-compatible SAC checkpoint) |
+| `model_based` (alias `shac`) | `examples/train_model_based.py` | `SHAC` | `{Safety,ReachAvoid,Cumulative}SHAC1P` (tensor path; single-player only) |
 
-!!! note "Cumulative is not the same class in both families"
+!!! note "Cumulative is not the same class in every family"
     A `cumulative` (plain reward-maximizing) task trains under **stock
     `stable_baselines3.PPO`** on the numpy bridge in the on-policy family, but under
     **`safety_sb3.CumulativeSAC1P`** on the tensor path in the off-policy family —
     stock SAC lacks the GPU tensor collector and executed-action readback that
     filtered training needs, so the off-policy cumulative learner is the safety_sb3
-    class (its checkpoint stays an SB3-compatible SAC zip). There is no two-player
-    cumulative game in either family.
+    class (its checkpoint stays an SB3-compatible SAC zip). The model-based family
+    has no stock counterpart: its cumulative learner is `safety_sb3.CumulativeSHAC1P`.
+    There is no two-player cumulative game in any family.
 
 The 2P cells differ **structurally** between the families — `*PPO2P` and `*SAC2P`
-are different algorithms (see [the MAP](../concepts/map.md)). `train.py` forwards
+are different algorithms (see [the MAP](../concepts/map.md)) — and the model-based
+family has none: its trainer takes no `--adversary`, and
+`algo_name(..., family="model_based", adversary=True)` raises. `train.py` forwards
 every other flag verbatim to the chosen trainer; run `--family <f> --help` to see
 that trainer's options, or the [CLI reference](../reference/cli.md).
 
@@ -33,6 +37,8 @@ python examples/train.py --family ppo        --task digit_stabilize_avoid --adve
 # off-policy (SAC family)
 python examples/train.py --family off_policy --task go2_stabilize                       # ReachAvoidSAC1P
 python examples/train.py --family sac        --task go2_stabilize --adversary --num-envs 1024  # ReachAvoidSAC2P
+# model-based (SHAC family)
+python examples/train.py --family model_based --task g1_recover                      # SafetySHAC1P
 ```
 
 - `--adversary` — two-player run; the learner is resolved by `algo_name`.
@@ -64,6 +70,7 @@ with `--config <that file>` to reproduce it exactly. The shipped recipes live in
 | `configs/go2_stabilize_reachavoidsac2p.yaml` | `off_policy` | `ReachAvoidSAC2P` — the E042 recipe (best-ever on `go2_stabilize`) |
 | `configs/go2_walker_flat.yaml` | `on_policy` | `mode: cumulative` — the dense-reward Go2 walker task policy on stock SB3 PPO |
 | `configs/go2_walker_filtered.yaml` | `off_policy` | `mode: cumulative` + a `safety_filter:` block — [filtered training](../safety-filter-training.md) |
+| `configs/g1_recover_safetyshac1p.yaml` | `model_based` | `SafetySHAC1P` — the G1 fall fallback through a learned world model, warm-started from the privileged-critic push policy |
 
 ## Env / task overrides
 
@@ -103,6 +110,20 @@ The off-policy trainer additionally exposes the reference-faithful safety contro
 see the [CLI reference](../reference/cli.md#off-policy-sac) and the safety_sb3
 [hyperparameters](https://saferoboticslab.github.io/safety-stable-baselines/hyperparameters/).
 
+The model-based trainer refuses tasks with in-episode exogenous disturbances
+(random pushes, scripted random joints, a learned adversary): its world model is
+deterministic and is not told about them. `--privileged-critic` is on by default —
+the env's `critic` group is the world-model state, since the G1 actor obs is not
+Markov. `--load` takes a `SafetyPPO1P` checkpoint with the same net shapes (actor,
+critic and obs normalizer) or a SHAC checkpoint (plus its world model); pair a warm
+start with `--wm-warmup-iters` / `--actor-delay-iters`. Its run directory is
+`<out>/<task>_<learner>` (e.g. `runs/g1_recover_safetyshac1p/`). `eval.py` and
+`play.py` load the checkpoint like a PPO twin (recognized by its `world_model.pth`);
+with the privileged critic the value filter is unavailable (named error), while the
+fallback / rollout filters work. See the
+[CLI reference](../reference/cli.md#model-based-shac) and the safety_sb3
+[SHAC hyperparameters](https://saferoboticslab.github.io/safety-stable-baselines/hyperparameters/#shac-model-based-tensor-path).
+
 ## Output
 
 Each run writes to `runs/<task>/` (override with `--out`, but keep runs under
@@ -116,6 +137,7 @@ The normalizer file depends on the training path:
 | Safety / reach-avoid PPO or SAC (tensor path) | `tensornormalize.pt` |
 | `cumulative` on-policy (stock SB3 PPO, numpy bridge) | `vecnormalize.pkl` |
 | `cumulative` off-policy (`CumulativeSAC1P`, tensor path) | `tensornormalize.pt` |
+| Any model-based (`*SHAC1P`, tensor path) | `tensornormalize.pt` |
 
 In short: only the on-policy `cumulative` path (stock SB3 on the numpy bridge)
 writes `vecnormalize.pkl`; every tensor-path run — including off-policy

@@ -1,0 +1,51 @@
+# SHAC vs PPO, apples to apples: SafetySHAC1P vs SafetyPPO1P, both from scratch,
+# 250M env steps (3 seeds each), on g1_recover started from the push policy's
+# post-push states.
+# Configs: configs/g1_recover_selfhandover_safety{shac,ppo}1p.yaml (their headers
+# say what is shared and what cannot be).
+#
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo/jobs.txt --list      # status of each job
+#   for i in 1 2 3 4 5 6 7; do examples/run_jobs.sh configs/sweeps/shac_vs_ppo/jobs.txt --only $i; done
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo/jobs.txt             # everything left
+#
+# Jobs run one at a time, finished ones are skipped on a rerun. Jobs 1-7 are the
+# test bank, the reference eval and SEED 0 of both arms with its summary: run
+# them first (the loop above) and check the table
+# before spending ~6 more GPU-hours on seeds 1-2 -- in particular the action
+# rows: SHAC's action penalties are in value units, so if its action_rate /
+# action_mag sit far above PPO's, raise its action_rate_coef / action_mag_coef
+# for seeds 1-2 (or add a regularized SHAC arm) so smoothness is matched.
+#
+# Approximate cost on the RTX 5080 (measured throughput): SHAC ~2.2 h per seed
+# (31k env-steps/s with TF32), PPO ~0.9 h per seed (80k/s), harvest + evals
+# ~0.5 h: ~9.7 h in all, ~3.5 h of it for jobs 1-7.
+#
+# Evaluation: label_start_states.py on the HELD-OUT bank (LAFAN TEST clips, a
+# different harvest seed): K = 4 deterministic rollouts per row, actions in the
+# env's +-3 box, no push, the training episode (3 s, rest truncation). Its
+# report adds the value-as-certificate and action statistics; the summary
+# aggregates seeds per learner (mean +- std).
+
+# 1. the held-out start states: same harvest as data/g1_self_handover_train.pt, on LAFAN test frames
+python examples/harvest_g1_frontier_states.py --policy runs/g1_recover_push_fast_privcrit/g1_recover_push_fast/final_model.zip --task g1_recover_lafan --dataset data/g1_recover_states_lafan1_test.pt --weights '{"mocap": 1, "nominal": 0, "clean": 0, "pushed": 0, "fell": 0, "synthetic": 0, "handover": 0}' --sampler uniform --kind handover --force-max 300 --delays 0 5 10 20 --samples 20000 --seed 1 --out data/g1_self_handover_test.pt
+# 2. reference: the push policy that generated the data, on the held-out bank
+python examples/label_start_states.py --policy runs/g1_recover_push_fast_privcrit/g1_recover_push_fast/final_model.zip --task g1_recover --no-push --bank data/g1_self_handover_test.pt --k 4 --out runs/shac_vs_ppo/eval/privcrit.pt
+# 3-4. seed 0 of both arms
+python examples/train.py --config configs/g1_recover_selfhandover_safetyshac1p.yaml --seed 0 --wandb-project shac_vs_ppo --out runs/shac_vs_ppo/shac_s0
+python examples/train.py --config configs/g1_recover_selfhandover_safetyppo1p.yaml --seed 0 --wandb-project shac_vs_ppo --out runs/shac_vs_ppo/ppo_s0
+# 5-7. seed 0 evals, then the table
+python examples/label_start_states.py --policy runs/shac_vs_ppo/shac_s0/g1_recover_safetyshac1p/final_model.zip --task g1_recover --no-push --bank data/g1_self_handover_test.pt --k 4 --out runs/shac_vs_ppo/eval/shac_s0.pt
+python examples/label_start_states.py --policy runs/shac_vs_ppo/ppo_s0/g1_recover/final_model.zip --task g1_recover --no-push --bank data/g1_self_handover_test.pt --k 4 --out runs/shac_vs_ppo/eval/ppo_s0.pt
+python examples/summarize_label_reports.py --group privcrit runs/shac_vs_ppo/eval/privcrit.pt --group SHAC runs/shac_vs_ppo/eval/shac_s*.pt --group PPO runs/shac_vs_ppo/eval/ppo_s*.pt --out runs/shac_vs_ppo/summary_table.json  # always
+# 8-11. seeds 1-2
+python examples/train.py --config configs/g1_recover_selfhandover_safetyshac1p.yaml --seed 1 --wandb-project shac_vs_ppo --out runs/shac_vs_ppo/shac_s1
+python examples/train.py --config configs/g1_recover_selfhandover_safetyppo1p.yaml --seed 1 --wandb-project shac_vs_ppo --out runs/shac_vs_ppo/ppo_s1
+python examples/train.py --config configs/g1_recover_selfhandover_safetyshac1p.yaml --seed 2 --wandb-project shac_vs_ppo --out runs/shac_vs_ppo/shac_s2
+python examples/train.py --config configs/g1_recover_selfhandover_safetyppo1p.yaml --seed 2 --wandb-project shac_vs_ppo --out runs/shac_vs_ppo/ppo_s2
+# 12-15. their evals
+python examples/label_start_states.py --policy runs/shac_vs_ppo/shac_s1/g1_recover_safetyshac1p/final_model.zip --task g1_recover --no-push --bank data/g1_self_handover_test.pt --k 4 --out runs/shac_vs_ppo/eval/shac_s1.pt
+python examples/label_start_states.py --policy runs/shac_vs_ppo/ppo_s1/g1_recover/final_model.zip --task g1_recover --no-push --bank data/g1_self_handover_test.pt --k 4 --out runs/shac_vs_ppo/eval/ppo_s1.pt
+python examples/label_start_states.py --policy runs/shac_vs_ppo/shac_s2/g1_recover_safetyshac1p/final_model.zip --task g1_recover --no-push --bank data/g1_self_handover_test.pt --k 4 --out runs/shac_vs_ppo/eval/shac_s2.pt
+python examples/label_start_states.py --policy runs/shac_vs_ppo/ppo_s2/g1_recover/final_model.zip --task g1_recover --no-push --bank data/g1_self_handover_test.pt --k 4 --out runs/shac_vs_ppo/eval/ppo_s2.pt
+# 16. the final table (all seeds)
+python examples/summarize_label_reports.py --group privcrit runs/shac_vs_ppo/eval/privcrit.pt --group SHAC runs/shac_vs_ppo/eval/shac_s*.pt --group PPO runs/shac_vs_ppo/eval/ppo_s*.pt --out runs/shac_vs_ppo/summary_table.json  # always

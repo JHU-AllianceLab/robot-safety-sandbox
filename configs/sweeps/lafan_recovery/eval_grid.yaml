@@ -1,0 +1,30 @@
+# The FROZEN push-suite grid, written by examples/eval_push_suite.py --calibrate (E1).
+# Every later eval reads it with --frozen. Edit only to record a deliberate decision.
+impulses: [0.0, 15.0, 30.0, 45.0, 60.0]
+durations: [0.1, 0.2, 0.3]
+directions: 8
+handover_delays: [0.0, 0.1, 0.2]
+episodes_per_cell: 64
+eval_s: 4.0
+onset_s: 0.1
+# Decision 2026-10-23 (after E1): the E-handover replay is kept to <= 0.3 s
+# (push onset U(0.02, 0.1) s into the replay, takeover <= 0.2 s after it). E1
+# itself ran with onset U(0.05, 0.2) s, so its E-handover numbers are on the
+# older protocol; the training ceiling chosen from E1 is 300 N, not the
+# grid-edge suggestion below.
+handover_onset_s: [0.02, 0.1]
+force_max_suggested: 390.0
+durations_overlap: null
+source:
+  setting: lafan
+  policy: push_fast_privcrit
+  f90: [null, <min]
+  f10: [null, '>max']
+f50_by_duration:
+  '0.1': [6.0, ok]
+  '0.2': [null, <min]
+  '0.3': [null, <min]
+warnings: [F90 is <min on the calibration grid; using 0 N s, F10 is >max on the calibration
+    grid; using 60 N s]
+calibration: /home/yuanhong/Documents/robot-safety-sandbox/runs/lafan_recovery/E1_calibration
+created: '2026-10-23T01:15:59'
