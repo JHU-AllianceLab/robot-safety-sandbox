@@ -97,5 +97,7 @@ class WaistTargetCommand(CommandTerm):
     err = (q - self.target).abs().amax(dim=1)
     self.metrics["error_waist"] += err / float(self._env.max_episode_length)
 
-  def _update_command(self) -> None:
-    pass
+  def _update_command(self, env_ids: torch.Tensor | None = None) -> None:
+    # mjlab main (the MuJoCo 3.16 stack) passes env_ids; the goal is constant
+    # within an episode, so there is nothing to advance.
+    del env_ids

@@ -22,7 +22,7 @@ set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
 
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
-conda activate mjlab
+conda activate "${ZOO_CONDA_ENV:-mjlab316}"   # this branch needs the MuJoCo 3.16 stack
 
 # Video clips render at step 0 and every video_interval: use the GPU's EGL,
 # not a software rasterizer (see envs/velocity/g1.py).

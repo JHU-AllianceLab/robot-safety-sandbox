@@ -147,12 +147,16 @@ def main(argv=None):
         act = pi(obs.float())
       ids = torch.arange(N, device=dev)
       qpos, qvel, ws = cr.live_state(env, ids)
+      tm = cr.live_thermal(env, ids)          # None unless a *_thermal task
+
+      def temps(i, tm=None):
+        return None if tm is None else tm[i]
       last = mj.action_manager.action.detach().cpu().numpy().astype(np.float64)
       gpu_obs = obs.detach().cpu().numpy().astype(np.float64)
       # 1. the observation
       buf = np.zeros(spec.obs_dim)
       for i in range(N):
-        roller.seed(i, qpos[i], qvel[i], ws[i])
+        roller.seed(i, qpos[i], qvel[i], ws[i], temps=temps(i, tm))
         roller.observe(i, last[i], buf)
         for nm, st, sz, _x in spec.obs_terms:
           obs_err[nm].append(float(np.abs(buf[st:st + sz] - gpu_obs[i, st:st + sz]).max()))
@@ -160,7 +164,7 @@ def main(argv=None):
       a0 = act.detach().cpu().numpy().astype(np.float64)
       g_cpu = np.empty(N)
       for i in range(N):
-        roller.seed(i, qpos[i], qvel[i], ws[i])
+        roller.seed(i, qpos[i], qvel[i], ws[i], temps=temps(i, tm))
         g_cpu[i] = roller.control_step(i, a0[i])
       q_cpu = np.stack([roller._d(i).qpos.copy() for i in range(N)])
       v_cpu = np.stack([roller._d(i).qvel.copy() for i in range(N)])
@@ -173,6 +177,10 @@ def main(argv=None):
       step_err["qpos"].extend(dq.max(1).tolist())
       step_err["qvel"].extend(np.abs(v_cpu - v1)[ok].max(1).tolist())
       step_err["g"].extend(np.abs(g_cpu - g1.cpu().numpy())[ok].tolist())
+      if tm is not None:   # the winding temperatures after the step, C
+        tw_cpu = np.stack([roller.temps[(i, 0)][0] for i in range(N)])
+        tw_gpu = cr.live_thermal(env, ids)[:, 0]
+        step_err.setdefault("Tw", []).extend(np.abs(tw_cpu - tw_gpu)[ok].max(1).tolist())
       # 3. a rollout: a kick, a perturbed first action, then the fallback
       if a.kick[1] > 0:
         robot = mj.scene["robot"]
@@ -185,12 +193,13 @@ def main(argv=None):
         mj.sim.forward()
         obs1 = mj.observation_manager.compute_group(env.obs_key, update_history=False).float()
       qpos, qvel, ws = cr.live_state(env, ids)
+      tm = cr.live_thermal(env, ids)
       first = pi(obs1.float()) + a.first_noise * torch.randn(N, act.shape[1], device=dev,
                                                              generator=gen)
       f_np = first.detach().cpu().numpy().astype(np.float64)
-      snaps.append((qpos, qvel, ws, f_np))
+      snaps.append((qpos, qvel, ws, f_np, tm))
       gmin_c, tf_c, g_tr, q_tr = roller.rollout(list(range(N)), qpos, qvel, ws, f_np, H,
-                                                trace=True)
+                                                trace=True, temps=tm)
       g_gpu = np.full((N, H), np.nan)
       q_gpu = np.full((N, H, qpos.shape[1]), np.nan)
       alive = np.ones(N, dtype=bool)
@@ -251,10 +260,10 @@ def main(argv=None):
   # 4. the pool: same answers, and its wall time
   pool = cr.CpuRolloutPool(spec, a.workers)
   try:
-    qpos, qvel, ws, f_np = snaps[-1]
+    qpos, qvel, ws, f_np, tm = snaps[-1]
     slots = np.arange(N)
-    g_ref, t_ref = roller.rollout(list(range(N)), qpos, qvel, ws, f_np, H)
-    g_p, t_p = pool.rollout(slots, qpos, qvel, ws, f_np, H)
+    g_ref, t_ref = roller.rollout(list(range(N)), qpos, qvel, ws, f_np, H, temps=tm)
+    g_p, t_p = pool.rollout(slots, qpos, qvel, ws, f_np, H, temps=tm)
     rep["pool"]["equal_to_in_process"] = bool(np.array_equal(g_ref, g_p)
                                               and np.array_equal(t_ref, t_p))
     # the workers run pi single-threaded: last-bit matmul differences grow over H
@@ -267,11 +276,12 @@ def main(argv=None):
       ts = []
       for _ in range(3):
         t0 = time.perf_counter()
-        pool.rollout(slots, qpos, qvel, ws, f_np, h)
+        pool.rollout(slots, qpos, qvel, ws, f_np, h, temps=tm)
         ts.append(time.perf_counter() - t0)
       rep["pool"][f"wall_s_{hs:g}s_x{N}"] = float(np.median(ts))
     t0 = time.perf_counter()
-    roller.rollout([0], qpos[:1], qvel[:1], ws[:1], f_np[:1], H)
+    roller.rollout([0], qpos[:1], qvel[:1], ws[:1], f_np[:1], H,
+                   temps=None if tm is None else tm[:1])
     rep["pool"]["single_rollout_in_process_s"] = time.perf_counter() - t0
   finally:
     pool.close()

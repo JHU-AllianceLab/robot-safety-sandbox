@@ -200,6 +200,7 @@ from robot_safety_sandbox.envs.g1_recover.policy_value_filter import (  # noqa: 
 from robot_safety_sandbox.envs.g1_recover.sonic import (  # noqa: E402
   DEFAULT_SONIC_DIR, SonicPolicy, SonicReference, SonicTracker)
 from robot_safety_sandbox.envs.g1_recover.spawn import SOURCES, RecoverSpawn  # noqa: E402
+from robot_safety_sandbox.envs.g1_recover.thermal import LIMIT_C, has_thermal, thermal_state  # noqa: E402
 from robot_safety_sandbox.envs.g1_recover.states import (  # noqa: E402
   FIELDS, KIND_MOCAP, OPTIONAL_FIELDS, load_bank, save_bank)
 from robot_safety_sandbox.eval.policies import load_twin, reset_policy_memory  # noqa: E402
@@ -796,6 +797,14 @@ class Evaluator:
       if rec_states:
         c_pred_st = torch.full((E, ctl.cond.n_rollouts or 1, Hc, 2), math.nan, device=dev)
         c_real_st = torch.full((E, Hc, 2), math.nan, device=dev)
+    # *_thermal tasks: per episode, did the overheat termination end it, and the
+    # hottest winding at the spawn and over the episode (before its last step;
+    # >= LIMIT_C when it overheated)
+    therm = thermal_state(mj) if has_thermal(mj) else None
+    if therm is not None:
+      ep_over = torch.zeros(E, dtype=torch.bool, device=dev)
+      ep_tw_peak = torch.full((E,), math.nan, device=dev)
+      ep_tw_start = torch.full((E,), math.nan, device=dev)
     waves = (E + n - 1) // n
     for w, w0 in enumerate(range(0, E, n)):
       w1 = min(E, w0 + n)
@@ -821,6 +830,10 @@ class Evaluator:
       # +dwell: pi holds every step before this one (set at each hand-over to pi)
       hold_until = torch.zeros(n, dtype=torch.long, device=dev)
       track = take.clone()
+      if therm is not None:
+        tw_start = therm.Tw.amax(1).clone()
+        tw_peak = tw_start.clone()
+        over = torch.zeros(n, dtype=torch.bool, device=dev)
       k = torch.zeros(n, dtype=torch.long, device=dev)
       if on_step is not None:
         on_step(ep, k, None)
@@ -883,7 +896,8 @@ class Evaluator:
             qpos, qvel, ws = cr.live_state(self.env, ids)
             gmin, _t_fail = self.pool.rollout(ids.cpu().numpy(), qpos, qvel, ws,
                                               a_nom[ids].double().cpu().numpy(), horizon,
-                                              n_rollouts=R or 1, noise=R is not None)
+                                              n_rollouts=R or 1, noise=R is not None,
+                                              temps=cr.live_thermal(self.env, ids))
             verdict = torch.as_tensor(gmin, dtype=torch.float32, device=dev)
           rollout_s += time.time() - t_r
           rollouts += int(ids.numel()) * (ctl.cond.n_rollouts or 1)
@@ -914,6 +928,10 @@ class Evaluator:
         obs, _g, dones, timeouts, _l = self.env.step_tensor(act)
         self.trace["g"] = _g
         k += 1
+        if therm is not None:
+          # a done env has respawned with new temperatures: keep its pre-step peak
+          tw_peak = torch.where(dones, tw_peak, torch.maximum(tw_peak, therm.Tw.amax(1)))
+          over = mj.termination_manager.get_term("motor_overheat") & dones
         if calib:
           # step j = k - decision (1..Hc) of the real "u_SONIC, then pi"
           j = k - (on + k_off[epc])
@@ -950,6 +968,15 @@ class Evaluator:
         if bool(oc["cut"].any()):
           raise SystemExit(f"[qcbf] {label}: {int(oc['cut'].sum())} episodes hit the env's "
                            f"time cap ({mj.max_episode_length} steps) inside their window")
+        if therm is not None:
+          for m_ in (oc["fell"], oc["up"]):
+            f_ids = m_.nonzero(as_tuple=False).squeeze(-1)
+            if f_ids.numel():
+              e_ = ep[f_ids]
+              ep_over[e_] = over[f_ids]
+              ep_tw_peak[e_] = torch.where(over[f_ids], tw_peak[f_ids].clamp_min(LIMIT_C),
+                                           tw_peak[f_ids])
+              ep_tw_start[e_] = tw_start[f_ids]
         book.finish(oc["fell"], ep, False, k, on)
         book.finish(oc["up"], ep, True, k, on)
         self._finish(oc["up"])
@@ -967,6 +994,13 @@ class Evaluator:
             f"({int(book.done.sum())}/{E} episodes, {loop} steps, "
             f"{loop * n / el:.0f} env-steps/s)", flush=True)
     rec = book.records()
+    if therm is not None:
+      rec.update(overheated=ep_over.cpu(), tw_peak_c=ep_tw_peak.cpu(),
+                 tw_start_max_c=ep_tw_start.cpu())
+      print(f"[qcbf]   {label} {ctl.cond.name}: overheated {int(ep_over.sum())}/{E}, fell "
+            f"(other causes) {int((~book.survived & ~ep_over).sum())}/{E}; hottest winding at "
+            f"the spawn {float(ep_tw_start.mean()):.1f} C, peak {float(ep_tw_peak.mean()):.1f} C "
+            f"(means)", flush=True)
     if calib:
       rec.update(calib_pred=c_pred.cpu(), calib_real=c_real.cpu(), calib_decision=k_off.cpu())
       if rec_states:

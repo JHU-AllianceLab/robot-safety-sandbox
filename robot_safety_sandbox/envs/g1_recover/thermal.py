@@ -1,0 +1,237 @@
+"""Motor temperatures for the G1 recovery tasks: the sysID heat model in the loop.
+
+The ``g1_recover*_thermal`` tasks add one constraint to the no-pelvis-height
+fallback: the hottest motor winding must stay below ``LIMIT_C`` = 85 C, the
+temperature at which the G1's own controller switches the drives to damping
+(the robot would collapse). Temperatures come from the lab's identified heat
+model (``envs/assets/g1_sysid.py`` -> ``g1_sysid.MotorThermal`` v0.4): per
+motor a winding (the robot's ``temperature[1]`` sensor, the one the limit is
+on), a housing (``temperature[0]``) and the structure the motor is bolted to,
+driven by the motor's torque and speed. ``sim_heat_scale=True``: the simulated
+robot makes less torque than the real one for the same motion (lighter links,
+no joint friction yet), and the sysID repo's per-motor scale corrects the
+copper heat; it is the repo's rule for simulated torques.
+
+THE STATE. :class:`MotorThermalState`, one per env (``thermal_state(env)``),
+``(num_envs, 29)`` tensors ``Tw``, ``Th``, ``Ts`` in Unitree MOTOR order
+(``MotorThermalState.names``). The terms below all read the same object.
+
+INTEGRATION, once per PHYSICS substep, by :class:`ThermalIntegrator`, a metrics
+term with ``per_substep=True``: mjlab calls it right after every ``mj_step``,
+inside the decimation loop, so the heat of each 5 ms substep uses that
+substep's own actuator force (the force the step just applied) and joint
+speed, and the state is current before terminations and the margin hook read
+it. (The sysID repo's own mjlab term integrates once per 20 ms env step from
+the last substep's force.) Its episode metric is the peak winding temperature.
+The motor torque is split across the ankle / waist linkages and the speed
+taken per motor as the heat model requires (``motor_torque`` /
+``motor_speed``).
+
+START TEMPERATURES, drawn at every reset (the user's choice, 2026-11-09):
+
+* a per-robot level ``T0 ~ U(30, 80)`` C; each motor's winding
+  ``Tw ~ U(30, T0)``. The hottest motor then sits near T0, spread evenly from
+  a cold to a hot robot, the others below it; which motor is hottest changes
+  from episode to episode. (Real sessions: hottest motor 51-74 C while the
+  median motor is at 37-44 C.)
+* each motor's housing ``Th = max(Tw - U(0, 20), 30)``: a winding that was
+  recently loaded sits above its housing (recordings: 0-2 C typically, up to
+  ~27 C when hot), which is the path its heat leaves by;
+* the structure ``Ts = Th`` (not measured; it does not move in a 3 s episode).
+
+The draws use torch's global RNG on the env's device, so an evaluation that
+reseeds torch before a reset (``eval_sonic_qcbf.py`` does, per wave, with a
+condition-independent key) gives every condition the same start temperatures.
+:meth:`MotorThermalState.set` overwrites them (e.g. from a recorded state).
+
+OBSERVATIONS. ``motor_winding_temp`` (Tw, 29) is an actor term with
+``+-0.5`` C uniform noise (the robot reports whole degrees) and, noise-free,
+a critic term; ``motor_housing_temp`` (Th, 29) is a critic term only. The
+critic group is a SHAC run's world-model state, so the model predicts both and
+the margin head can read the thermal term. ``Ts`` stays out: unmeasured, and
+it does not change within an episode.
+
+MARGIN AND TERMINATION. ``g_thermal = (LIMIT_C - max Tw) / SCALE_C``: 1 at
+75 C, 0 at the limit, so it competes with the fall terms (tilt, non-foot
+contact; both 1 when comfortably safe) only in the last ~10 C.
+``motor_overheat`` ends the episode, as a failure, once ``max Tw >= LIMIT_C``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import torch
+from mjlab.managers.manager_base import ManagerTermBase
+
+from robot_safety_sandbox.envs.assets.g1_sysid import motor_thermal_cls
+
+#: winding temperature limit, C: the G1 controller's damping threshold
+LIMIT_C = 85.0
+#: margin scale, C: g_thermal = 1 at LIMIT_C - SCALE_C
+SCALE_C = 10.0
+#: attribute of the mjlab env that holds its MotorThermalState
+_KEY = "_zoo_motor_thermal"
+
+
+@dataclass(frozen=True)
+class ThermalCfg:
+  """Start-temperature draw and heat-model options (module docstring)."""
+
+  #: per-robot level T0 ~ U(lo, hi), C; the hottest winding sits near it
+  start_level_c: tuple[float, float] = (30.0, 80.0)
+  #: each winding ~ U(start_floor_c, T0); the housing is floored here too
+  start_floor_c: float = 30.0
+  #: winding - housing ~ U(lo, hi) per motor, C
+  housing_gap_c: tuple[float, float] = (0.0, 20.0)
+  #: scale the copper heat of simulated torques to the real robot's (sysID repo)
+  sim_heat_scale: bool = True
+
+
+class MotorThermalState:
+  """Per-env winding / housing / structure temperatures ``(num_envs, 29)`` in
+  Unitree motor order, and the heat model that moves them."""
+
+  def __init__(self, env, cfg: ThermalCfg, asset_name: str = "robot"):
+    self.cfg = cfg
+    self.robot = env.scene[asset_name]
+    self.device = env.device
+    like = torch.zeros(1, device=env.device)
+    self.th = motor_thermal_cls().from_json(like=like, sim_heat_scale=cfg.sim_heat_scale)
+    #: motor names, Unitree order (joint ``<name>_joint``)
+    self.names = tuple(self.th.names)
+    acts, joints = list(self.robot.actuator_names), list(self.robot.joint_names)
+    missing = [n for n in self.names if n + "_joint" not in acts or n + "_joint" not in joints]
+    if missing:
+      raise ValueError(f"the robot has no actuator / joint for motors {missing}")
+    self.act_perm = torch.tensor([acts.index(n + "_joint") for n in self.names],
+                                 device=env.device)
+    self.jnt_perm = torch.tensor([joints.index(n + "_joint") for n in self.names],
+                                 device=env.device)
+    n = int(env.num_envs)
+    self.Tw = torch.zeros(n, len(self.names), device=env.device)
+    self.Th = torch.zeros_like(self.Tw)
+    self.Ts = torch.zeros_like(self.Tw)
+    self.reset(None)
+
+  @property
+  def T(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``(Tw, Th, Ts)``, e.g. for ``th.affine_terms(T, w)``."""
+    return self.Tw, self.Th, self.Ts
+
+  def draw(self, n: int, generator: torch.Generator | None = None):
+    """``n`` start states ``(Tw, Th, Ts)``, each ``(n, 29)`` (module docstring)."""
+    c = self.cfg
+    k = len(self.names)
+
+    def u(*shape):
+      return torch.rand(*shape, device=self.device, generator=generator)
+
+    lo, hi = c.start_level_c
+    level = lo + (hi - lo) * u(n, 1)
+    floor = float(c.start_floor_c)
+    Tw = floor + (level - floor).clamp_min(0.0) * u(n, k)
+    g_lo, g_hi = c.housing_gap_c
+    Th = (Tw - (g_lo + (g_hi - g_lo) * u(n, k))).clamp_min(floor)
+    Th = torch.minimum(Th, Tw)
+    return Tw, Th, Th.clone()
+
+  def reset(self, env_ids=None) -> None:
+    ids = slice(None) if env_ids is None else env_ids
+    n = int(self.Tw[ids].shape[0])
+    if n == 0:
+      return
+    Tw, Th, Ts = self.draw(n)
+    self.set(ids, Tw, Th, Ts)
+
+  def set(self, env_ids, Tw, Th, Ts) -> None:
+    """Overwrite the temperatures of ``env_ids`` (slice / index tensor)."""
+    ids = slice(None) if env_ids is None else env_ids
+    self.Tw[ids] = Tw
+    self.Th[ids] = Th
+    self.Ts[ids] = Ts
+
+  def motor_inputs(self):
+    """Per-motor torque and speed now, ``(num_envs, 29)`` each (linkage split)."""
+    d = self.robot.data
+    tau = self.th.motor_torque(d.actuator_force[:, self.act_perm])
+    w = self.th.motor_speed(d.joint_vel[:, self.jnt_perm])
+    return tau, w
+
+  def step(self, dt: float) -> None:
+    """Advance every env by ``dt`` seconds of the current torque and speed."""
+    tau, w = self.motor_inputs()
+    Tw, Th, Ts = self.th.step(self.T, tau, w, float(dt))
+    self.Tw.copy_(Tw)
+    self.Th.copy_(Th)
+    self.Ts.copy_(Ts)
+
+
+def thermal_state(env, cfg: ThermalCfg | None = None) -> MotorThermalState:
+  """The env's :class:`MotorThermalState`; the first caller (with a ``cfg``)
+  creates it. The observation manager is built first, so its terms do."""
+  st = getattr(env, _KEY, None)
+  if st is None:
+    if cfg is None:
+      raise RuntimeError("this env has no motor thermal state (not a *_thermal task?)")
+    st = MotorThermalState(env, cfg)
+    setattr(env, _KEY, st)
+  elif cfg is not None and cfg != st.cfg:
+    raise ValueError(f"thermal terms disagree on the ThermalCfg: {cfg} vs {st.cfg}")
+  return st
+
+
+def has_thermal(env) -> bool:
+  return getattr(env, _KEY, None) is not None
+
+
+class ThermalIntegrator(ManagerTermBase):
+  """Metrics term (``per_substep=True``): integrates the heat model over one
+  physics substep and returns the hottest winding (the episode metric, with
+  ``reduce="max"``). Its reset draws the episode's start temperatures."""
+
+  def __init__(self, cfg, env):
+    super().__init__(env)
+    self.state = thermal_state(env, cfg.params.get("thermal_cfg"))
+    self.dt = float(env.physics_dt)
+
+  def reset(self, env_ids=None) -> None:
+    self.state.reset(env_ids)
+
+  def __call__(self, env, thermal_cfg: ThermalCfg | None = None) -> torch.Tensor:
+    del thermal_cfg
+    self.state.step(self.dt)
+    return self.state.Tw.amax(dim=1)
+
+
+def motor_winding_temp(env, thermal_cfg: ThermalCfg | None = None) -> torch.Tensor:
+  """Winding temperatures, C, ``(num_envs, 29)``, motor order."""
+  return thermal_state(env, thermal_cfg).Tw.clone()
+
+
+def motor_housing_temp(env, thermal_cfg: ThermalCfg | None = None) -> torch.Tensor:
+  """Housing temperatures, C, ``(num_envs, 29)``, motor order."""
+  return thermal_state(env, thermal_cfg).Th.clone()
+
+
+def motor_overheat(env, limit_c: float = LIMIT_C,
+                   thermal_cfg: ThermalCfg | None = None) -> torch.Tensor:
+  """Termination: some winding reached ``limit_c`` (the robot goes limp)."""
+  return thermal_state(env, thermal_cfg).Tw.amax(dim=1) >= float(limit_c)
+
+
+def g_thermal(env) -> torch.Tensor:
+  """Thermal margin ``(LIMIT_C - max winding) / SCALE_C``; < 0 == over the limit."""
+  return (LIMIT_C - thermal_state(env).Tw.amax(dim=1)) / SCALE_C
+
+
+def g_fall_noheight_thermal(env) -> torch.Tensor:
+  """``g_fall_noheight`` (pelvis tilt, non-foot contact) and ``g_thermal``:
+  the margin of the ``*_thermal`` tasks. Unclamped; ``compose`` clamps."""
+  from robot_safety_sandbox.envs.g1_stabilize.env_cfg import g_fall_noheight
+  return torch.minimum(g_fall_noheight(env), g_thermal(env))
+
+
+g_fall_noheight_thermal.fall_height_term = False
+#: what a CPU rollout must add to the fall margin (cpu_rollout.build_spec)
+g_fall_noheight_thermal.thermal = dict(limit_c=LIMIT_C, scale_c=SCALE_C)

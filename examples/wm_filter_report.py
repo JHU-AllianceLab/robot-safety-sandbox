@@ -267,6 +267,11 @@ def survival(evals: list[dict], tags) -> dict:
     eng = cat(lambda r: r["tel_engaged"][:, 1].double())
     st = cat(lambda r: r["tel_steps"][:, 1].double())
     sw = cat(lambda r: r["tel_switches"][:, 1].double())
+    # *_thermal tasks: a failure is a fall OR a winding at the limit (eval_sonic_qcbf
+    # books "overheated" and the episode's peak winding temperature)
+    thermal = all("overheated" in d["conditions"][name] for d in evals)
+    oh = cat(lambda r: r["overheated"].bool()) if thermal else None
+    pk = cat(lambda r: r["tw_peak_c"].double()) if thermal else None
     row = {"label": label, "bins": {}, "per_seed": {}}
     # the seeds run the SAME episode list (row i is one episode in every run): an
     # episode's runs are one cluster, so the interval uses the per-episode mean over seeds
@@ -293,6 +298,11 @@ def survival(evals: list[dict], tags) -> dict:
                         "ci": "Wilson at the clustered effective n" if same else "Wilson",
                         "shac_share": float(eng[m].sum() / st[m].sum()) if n else math.nan,
                         "handovers": float(sw[m].mean()) if n else math.nan}
+      if thermal:
+        row["bins"][b].update(overheated=float(oh[m].double().mean()) if n else math.nan,
+                              fell_other=float((~sv[m] & ~oh[m]).double().mean()) if n
+                              else math.nan,
+                              tw_peak_mean_c=float(pk[m].mean()) if n else math.nan)
     for tag, d in zip(tags, evals):
       row["per_seed"][tag] = float(d["conditions"][name]["survived"].double().mean())
     out["filters"][name] = row
@@ -373,7 +383,11 @@ def main(argv=None):
   sv = rep["survival"]
   for name, row in sv["filters"].items():
     print(f"  {row['label']:32s} " + " ".join(f"{100 * row['bins'][b]['sr']:5.1f}" for b in sv["bins"] + ["all"])
-          + "  | SHAC " + " ".join(f"{100 * row['bins'][b]['shac_share']:3.0f}" for b in sv["bins"] + ["all"]))
+          + "  | SHAC " + " ".join(f"{100 * row['bins'][b]['shac_share']:3.0f}" for b in sv["bins"] + ["all"])
+          + ("  | overheated " + " ".join(f"{100 * row['bins'][b]['overheated']:4.1f}"
+                                        for b in sv["bins"] + ["all"])
+             + f" (peak winding {row['bins']['all']['tw_peak_mean_c']:.1f} C)"
+             if "overheated" in row["bins"]["all"] else ""))
   if a.pick_videos:
     print(f"  best WM tube filters: {rep['videos']['best_wm']}")
     for k, v in rep["videos"]["categories"].items():

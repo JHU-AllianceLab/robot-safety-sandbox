@@ -1,0 +1,12 @@
+# The start bank of the motor-temperature SHAC (configs/g1_recover_sonic_thermal_safetyshac1p.yaml):
+# the recipe of the no-height bank (configs/sweeps/shac_noheight/data_jobs.txt) re-run on the
+# lab's identified G1 (task g1_recover_lafan_sysid: dcmotor actuators, measured waist ranges,
+# refitted collision capsules; g1_recover_lafan's fall terminations, no temperatures) under
+# MuJoCo 3.16. Same SONIC harvest (train clips, seed 0, 50k episodes, kick |dv| ~ U(0, 5) m/s),
+# but SONIC drives the robot's OWN hip pitch (--hip mjlab; the earlier banks used SONIC's
+# 7520-22 hip, which the identified robot does not have). Rows 0 / 0.1 / 0.2 / 0.3 s after the
+# kick, then the eta = 0.1 net. Temperatures are not in the bank (drawn at every reset).
+# One GPU, in order; prep_and_smoke.sh runs it (conda env mjlab316).
+python examples/harvest_g1_sonic_trajectories.py --task g1_recover_lafan_sysid --hip mjlab --library data/g1_lafan1_clips_train.pt --sonic-dir $HOME/gear_sonic_hf --episodes 50000 --seed 0 --bank-delays-s --out data/g1_sonic_push_gfall_sysid316_train.pt  # creates: data/g1_sonic_push_gfall_sysid316_train.pt
+python examples/harvest_g1_sonic_trajectories.py --from-traj data/g1_sonic_push_gfall_sysid316_train.pt --bank-delays-s 0 0.1 0.2 0.3 --bank-out data/g1_sonic_push_gfall_sysid316_train_bank.pt  # creates: data/g1_sonic_push_gfall_sysid316_train_bank.pt
+python examples/dedup_start_bank.py --bank data/g1_sonic_push_gfall_sysid316_train_bank.pt  # creates: data/g1_sonic_push_gfall_sysid316_train_bank_net.pt

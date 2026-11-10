@@ -160,6 +160,11 @@ def use_sonic_hip_pitch(cfg) -> None:
   hip = ".*_hip_pitch_joint"
   robot = cfg.scene.entities["robot"]
   acts = list(robot.articulation.actuators)
+  if any(type(a).__name__ == "BuiltinDcMotorActuatorCfg" for a in acts):
+    # the lab's identified G1 (envs/assets/g1_sysid.py): its hip pitch is the
+    # identified 7520-14 dcmotor; swapping gains into it would mix two motors
+    raise ValueError("this robot has dcmotor actuators (the identified G1): keep its own "
+                     "hip pitch (--hip mjlab)")
   out = []
   for a in acts:
     names = tuple(a.target_names_expr)
@@ -292,13 +297,18 @@ class SonicReference:
   @classmethod
   def build(cls, csv_dir: str, clip_names: Sequence[str], device,
             input_fps: int = 30, library: Optional[dict] = None) -> "SonicReference":
-    from mjlab.scripts.csv_to_npz import MotionLoader
     from robot_safety_sandbox.envs.g1_recover.states import to_heading_frame
     csv_order = _csv_joints()
     perm = torch.as_tensor([csv_order.index(n) for n in SONIC_JOINTS])
+    lib_len = None if library is None else library["meta"].get("clip_frames")
+    if lib_len is not None and len(lib_len) != len(clip_names):
+      raise ValueError("the library's clip_frames do not match its clips")
+    # the libraries built before the MuJoCo 3.16 port carry no time_grid: mjlab 1.2's
+    grid = (TIME_GRID if library is None
+            else library["meta"].get("time_grid", "mjlab-1.2"))
     pos, vel, quat, lengths = [], [], [], []
-    for name in clip_names:
-      ml = MotionLoader(os.path.join(csv_dir, f"{name}.csv"), int(input_fps), 50, "cpu")
+    for i, name in enumerate(clip_names):
+      ml = _motion_loader(os.path.join(csv_dir, f"{name}.csv"), int(input_fps), 50, grid)
       p = ml.motion_dof_poss[:, perm]
       pos.append(p)
       vel.append(forward_difference(p, 50.0))
@@ -307,7 +317,6 @@ class SonicReference:
     ref = cls(torch.cat(pos).float().to(device), torch.cat(vel).float().to(device),
               torch.cat(quat).float().to(device), lengths, clip_names)
     if library is not None:
-      lib_len = library["meta"].get("clip_frames")
       if lib_len is not None and list(lib_len) != lengths:
         raise ValueError("clip lengths differ from the library's clip_frames")
       rows = ref.rows(library["clip"].to(device), library["frame"].to(device))
@@ -316,8 +325,20 @@ class SonicReference:
                             torch.zeros(rows.numel(), 3, device=device))[0]
       lib_q = library["root_quat_h"].to(device)
       err = 1.0 - (qh * lib_q).sum(1).abs()
-      if float(err.max()) > 1e-4:
-        raise ValueError(f"reference and library disagree (max 1-|<q,q'>| "
+      # The yaw-free quaternion is ill-conditioned where the pelvis is near
+      # horizontal (the yaw is undefined): there, last-ulp differences between
+      # CPUs / torch builds swing it by up to ~1.5e-3 (a 90.2 deg frame of
+      # fallAndGetUp2_subject3, 1 row in 339k, on the cluster's GPU nodes). The
+      # gravity direction in the root frame is the well-conditioned part of the
+      # same orientation: check it everywhere, and the quaternion on all but
+      # the worst 0.1% of rows. A misaligned library fails both by far.
+      g = torch.tensor([0.0, 0.0, -1.0], device=device).expand(rows.numel(), 3)
+      g_err = (quat_apply_inverse(ref.root_quat[rows], g)
+               - quat_apply_inverse(lib_q, g)).norm(dim=1)
+      q999 = float(torch.quantile(err.float(), 0.999))
+      if float(g_err.max()) > 1e-2 or q999 > 1e-4:
+        raise ValueError(f"reference and library disagree (max |gravity direction diff| "
+                         f"{float(g_err.max()):.2e}, 99.9% 1-|<q,q'>| {q999:.2e}, max "
                          f"{float(err.max()):.2e})")
     return ref
 
@@ -325,6 +346,47 @@ class SonicReference:
     """Global rows of ``(clip, frame)``, the frame clamped to the clip's end."""
     f = torch.minimum(frame, self.length[clip] - 1).clamp_min(0)
     return self.start[clip] + f
+
+
+#: the output time grid this stack's mjlab resamples clips on (see _motion_loader);
+#: a clip library records the one it was built on as meta["time_grid"]
+TIME_GRID = "mjlab-main"
+
+
+def _motion_loader(path: str, input_fps: int, output_fps: int, grid: str = TIME_GRID):
+  """mjlab's ``MotionLoader`` (CPU) on a given output time grid.
+  ``"mjlab-1.2"``: ``arange(0, duration, dt)`` in float32, what mjlab 1.2
+  resampled at, so every library built before the MuJoCo 3.16 port;
+  ``"mjlab-main"``: mjlab main's (dcdf6ce5) ``arange(n) * dt`` with the end
+  point kept when it lands on the grid. The two differ by one frame at the end
+  of some clips and by float32 rounding of every time stamp elsewhere -- small,
+  but enough to move the yaw-free orientation of a lying-down frame past
+  ``SonicReference.build``'s 1e-4 check. The interpolation itself is mjlab's,
+  unchanged."""
+  import math
+
+  from mjlab.scripts.csv_to_npz import MotionLoader
+  if grid not in ("mjlab-1.2", "mjlab-main"):
+    raise ValueError(f"time grid {grid!r}: mjlab-1.2 | mjlab-main")
+
+  class _Loader(MotionLoader):
+    def _interpolate_motion(self):
+      if grid == "mjlab-1.2":
+        times = torch.arange(0, self.duration, self.output_dt, device=self.device,
+                             dtype=torch.float32)
+      else:
+        n = math.floor(self.duration / self.output_dt + 1e-6) + 1
+        times = torch.arange(n, device=self.device, dtype=torch.float32) * self.output_dt
+      self.output_frames = times.shape[0]
+      i0, i1, blend = self._compute_frame_blend(times)
+      self.motion_base_poss = self._lerp(self.motion_base_poss_input[i0],
+                                         self.motion_base_poss_input[i1], blend.unsqueeze(1))
+      self.motion_base_rots = self._slerp(self.motion_base_rots_input[i0],
+                                          self.motion_base_rots_input[i1], blend)
+      self.motion_dof_poss = self._lerp(self.motion_dof_poss_input[i0],
+                                        self.motion_dof_poss_input[i1], blend.unsqueeze(1))
+
+  return _Loader(path, int(input_fps), int(output_fps), "cpu")
 
 
 def forward_difference(pos: torch.Tensor, fps: float) -> torch.Tensor:

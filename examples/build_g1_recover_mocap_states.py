@@ -294,6 +294,9 @@ def main():
   if args.library:
     bank["meta"].update(
       library=True, min_follow=args.min_follow, clip_frames=list(clip_frames),
+      # this stack's MotionLoader grid (envs/g1_recover/sonic.py TIME_GRID); a
+      # library without the key was built on mjlab 1.2's
+      time_grid="mjlab-main",
       start_ok_rows=int(bank["start_ok"].sum()),
       start_ok_per_category={c: int(((bank["category"] == i) & bank["start_ok"]).sum())
                              for i, c in enumerate(categories)})

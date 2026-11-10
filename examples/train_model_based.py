@@ -136,6 +136,22 @@ def _warm_start(model, path: str, device: str, world_model: bool = True) -> None
   print(msg)
 
 
+def _record_thermal(env, outdir: str) -> None:
+  """A *_thermal task: write which identified robot / heat model and which
+  start-temperature draw the run used to ``<outdir>/g1_sysid.json``."""
+  from robot_safety_sandbox.envs.g1_recover.thermal import has_thermal, thermal_state
+  if not has_thermal(env.mj):
+    return
+  import dataclasses
+  import json
+  from robot_safety_sandbox.envs.assets.g1_sysid import provenance
+  info = dict(provenance(), thermal_cfg=dataclasses.asdict(thermal_state(env.mj).cfg))
+  with open(os.path.join(outdir, "g1_sysid.json"), "w") as f:
+    json.dump(info, f, indent=1)
+  print(f"[thermal] identified G1 + heat model v{info['version']} ({info['sysid_dir']}); "
+        f"start draw {info['thermal_cfg']}")
+
+
 def main():
   p = argparse.ArgumentParser()
   p.add_argument("--config", default=None,
@@ -272,6 +288,7 @@ def main():
     print(f"[world-model] state = the '{env.critic_obs_key}' group "
           f"({env.critic_observation_space.shape[0]} dims); actor obs "
           f"{env.observation_space.shape[0]} dims")
+  _record_thermal(env, outdir)
   ctx = env.sim_context()
   print(f"[world-model] sim context: {0 if ctx is None else ctx.shape[1]} dims "
         f"{[(f, len(i)) for _, f, i in getattr(env, '_ctx_cols', None) or []]}")

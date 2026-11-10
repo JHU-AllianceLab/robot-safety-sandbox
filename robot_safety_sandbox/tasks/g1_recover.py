@@ -78,6 +78,18 @@ below, whose target is the stance set after the push.
 ``g1_recover_noheight_nofoot_nolinvel``, ``g1_recover_lafan_noheight_nofoot_nolinvel``
                           ... and no base_lin_vel either: the critic group is
                           exactly the actor terms (98-D, noise-free).
+``g1_recover_thermal``, ``g1_recover_lafan_thermal``
+                          the *_noheight tasks on the lab's identified G1
+                          (``envs/assets/g1_sysid.py``: dcmotor actuators,
+                          measured waist ranges, refitted collision capsules)
+                          with its motor heat model in the loop
+                          (``envs/g1_recover/thermal.py``): margin min(tilt,
+                          non-foot contact, (85 C - hottest winding) / 10 C),
+                          a winding at 85 C ends the episode, start temperatures
+                          drawn per reset; actor + 29 winding temperatures,
+                          critic group + winding and housing temperatures.
+``g1_recover_lafan_sysid`` g1_recover_lafan on the identified G1, no
+                          temperatures: SONIC's start states on that robot.
 ``g1_recover_bench``     the SONIC push benchmark's world (``envs/g1_recover/
                           push_bench.py``): K as margin (joint term over 0.2
                           rad) and termination, 2 ms x 10 physics, SONIC's
@@ -125,8 +137,10 @@ LAFAN_RA_TOLS = {"g1_recover_lafan_ra": (0.25, 0.30),
 def register_all() -> None:
   from robot_safety_sandbox.envs.g1_recover.env_cfg import (
     g1_recover_env_cfg, g1_recover_k_env_cfg, g1_recover_noheight_env_cfg,
-    g1_recover_noheight_nofoot_env_cfg, g1_recover_noheight_nofoot_nolinvel_env_cfg)
+    g1_recover_noheight_nofoot_env_cfg, g1_recover_noheight_nofoot_nolinvel_env_cfg,
+    g1_recover_sysid_env_cfg, g1_recover_thermal_env_cfg)
   from robot_safety_sandbox.envs.g1_recover.k_set import CLAMP as K_CLAMP, g_k
+  from robot_safety_sandbox.envs.g1_recover.thermal import g_fall_noheight_thermal
   from robot_safety_sandbox.envs.g1_recover.targets import make_l_stance
   from robot_safety_sandbox.envs.g1_stabilize.env_cfg import g_fall, g_fall_noheight
   # Every g1_recover* task but the g1_recover_lafan_ra* twins (below) is
@@ -266,6 +280,35 @@ def register_all() -> None:
     kwargs=lafan_kwargs(),
     description="g1_recover_lafan_noheight_nofoot with no base_lin_vel in the "
                 "critic group either (avoid-only, single-player)."))
+  # MOTOR TEMPERATURES on the lab's identified G1 (envs/assets/g1_sysid.py,
+  # envs/g1_recover/thermal.py): the *_noheight tasks plus a winding limit.
+  # margin g_fall_noheight_thermal = min(tilt, non-foot contact,
+  # (85 C - hottest winding) / 10 C); a winding at 85 C ends the episode (the
+  # G1 controller goes to damping). Actor obs + 29 winding temps (127-D);
+  # critic group / world-model state + winding and housing temps (171-D).
+  register(TaskSpec(
+    task_id="g1_recover_thermal", cfg_builder=g1_recover_thermal_env_cfg,
+    margin_fn=compose(g_fall_noheight_thermal), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, kwargs=dict(G1_BRIDGE_KWARGS),
+    description="g1_recover_noheight on the identified G1 with its motor heat model: "
+                "no fall and every winding below 85 C (avoid-only)."))
+  register(TaskSpec(
+    task_id="g1_recover_lafan_thermal", cfg_builder=g1_recover_thermal_env_cfg,
+    margin_fn=compose(g_fall_noheight_thermal), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, dstb_dim=3, supports_adversary=False,
+    kwargs=lafan_kwargs(),
+    description="g1_recover_lafan_noheight on the identified G1 with its motor heat "
+                "model: no fall and every winding below 85 C (avoid-only, single-player)."))
+  # The identified G1 without temperatures: g1_recover_lafan's world (margin
+  # g_fall, its terminations) on the robot the *_thermal tasks use, for
+  # harvesting SONIC's start states on it.
+  register(TaskSpec(
+    task_id="g1_recover_lafan_sysid", cfg_builder=g1_recover_sysid_env_cfg,
+    margin_fn=compose(g_fall), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, dstb_dim=3, supports_adversary=False,
+    kwargs=lafan_kwargs(),
+    description="g1_recover_lafan on the identified G1 (dcmotor actuators, measured "
+                "ranges and collision geometry), no temperatures (avoid-only)."))
   # The same task on the ViaLasso safe set K: margin g_k (already clipped and
   # anchored to K, so compose's clamp is a no-op) and the episode ends on
   # leaving K (k_set.use_k_terminations).

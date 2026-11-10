@@ -195,6 +195,74 @@ def g1_recover_noheight_nofoot_nolinvel_env_cfg(play: bool = False,
                             critic_foot_terms=False, critic_base_lin_vel=False, **kwargs)
 
 
+def use_sysid_robot(cfg: ManagerBasedRlEnvCfg, v_bus: float | None = None) -> None:
+  """Swap the robot for the lab's identified G1 (``envs/assets/g1_sysid.py``:
+  measured waist ranges, refitted collision capsules, MuJoCo ``<dcmotor>``
+  actuators at battery voltage ``v_bus``). Names, gains, peak torques and
+  armatures are mjlab's G1's, so sensors, events, the action scale and the
+  observation layout carry over unchanged."""
+  from robot_safety_sandbox.envs.assets.g1_sysid import (DEFAULT_V_BUS,
+                                                         get_g1_sysid_robot_cfg)
+  cfg.scene.entities["robot"] = get_g1_sysid_robot_cfg(
+    DEFAULT_V_BUS if v_bus is None else float(v_bus))
+
+
+def g1_recover_sysid_env_cfg(play: bool = False, v_bus: float | None = None,
+                             **kwargs) -> ManagerBasedRlEnvCfg:
+  """:func:`g1_recover_env_cfg` on the lab's identified G1 (:func:`use_sysid_robot`),
+  no motor temperatures (the ``*_sysid`` tasks: harvesting start states on
+  the robot the ``*_thermal`` tasks train on); same kwargs, plus ``v_bus``."""
+  cfg = g1_recover_env_cfg(play=play, **kwargs)
+  use_sysid_robot(cfg, v_bus)
+  return cfg
+
+
+def g1_recover_thermal_env_cfg(play: bool = False, v_bus: float | None = None,
+                               thermal_start_level_c=(30.0, 80.0),
+                               thermal_start_floor_c: float = 30.0,
+                               thermal_housing_gap_c=(0.0, 20.0),
+                               thermal_sim_heat_scale: bool = True,
+                               **kwargs) -> ManagerBasedRlEnvCfg:
+  """:func:`g1_recover_noheight_env_cfg` on the lab's identified G1 with its
+  motor heat model in the loop (the ``*_thermal`` tasks, ``thermal.py``):
+
+  * actor obs + ``motor_temp`` (29 winding temperatures, +-0.5 C noise): 127-D;
+  * critic group (the world-model state) + ``motor_temp`` and
+    ``motor_temp_housing`` (noise-free): 113 + 58 = 171-D;
+  * termination ``motor_overheat`` (a winding at 85 C: the robot goes limp);
+  * metrics term ``motor_temp_max``: integrates the heat model every physics
+    substep, draws the start temperatures at reset, logs the episode's peak.
+
+  The margin (``g_fall_noheight_thermal``) is the task registration's. The
+  ``thermal_*`` kwargs set :class:`~robot_safety_sandbox.envs.g1_recover.thermal.ThermalCfg`."""
+  from mjlab.managers.metrics_manager import MetricsTermCfg
+  from mjlab.utils.noise import UniformNoiseCfg
+
+  from robot_safety_sandbox.envs.g1_recover.thermal import (
+    LIMIT_C, ThermalCfg, ThermalIntegrator, motor_housing_temp, motor_overheat,
+    motor_winding_temp)
+  if kwargs.pop("critic_pelvis_height", False):
+    raise ValueError("the *_thermal tasks fix critic_pelvis_height=False")
+  cfg = g1_recover_env_cfg(play=play, critic_pelvis_height=False, **kwargs)
+  use_sysid_robot(cfg, v_bus)
+  tc = ThermalCfg(start_level_c=tuple(float(x) for x in thermal_start_level_c),
+                  start_floor_c=float(thermal_start_floor_c),
+                  housing_gap_c=tuple(float(x) for x in thermal_housing_gap_c),
+                  sim_heat_scale=bool(thermal_sim_heat_scale))
+  p = {"thermal_cfg": tc}
+  cfg.observations["actor"].terms["motor_temp"] = ObservationTermCfg(
+    func=motor_winding_temp, params=dict(p), noise=UniformNoiseCfg(n_min=-0.5, n_max=0.5))
+  cfg.observations["critic"].terms["motor_temp"] = ObservationTermCfg(
+    func=motor_winding_temp, params=dict(p))
+  cfg.observations["critic"].terms["motor_temp_housing"] = ObservationTermCfg(
+    func=motor_housing_temp, params=dict(p))
+  cfg.terminations["motor_overheat"] = TerminationTermCfg(
+    func=motor_overheat, params=dict(p, limit_c=LIMIT_C))
+  cfg.metrics["motor_temp_max"] = MetricsTermCfg(
+    func=ThermalIntegrator, params=dict(p), per_substep=True, reduce="max")
+  return cfg
+
+
 def g1_recover_k_env_cfg(play: bool = False, **kwargs) -> ManagerBasedRlEnvCfg:
   """:func:`g1_recover_env_cfg` whose episodes end when the state leaves the
   ViaLasso safe set K (``k_set.use_k_terminations``); same kwargs."""

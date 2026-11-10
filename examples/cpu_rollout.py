@@ -27,7 +27,11 @@ measures how well):
   those substeps (the margin reads ``force_history``), then the actor's
   observation after one mj_forward (mjlab's single post-step forward);
 * g = ``compose(g_fall)``: pelvis height, tilt and non-foot ground force,
-  clamped to +-CLAMP; or, on a task that ends on leaving K (``k_failure``,
+  clamped to +-CLAMP (on a ``*_thermal`` task also the hottest motor winding,
+  ``(85 C - max Tw) / 10 C``, the episode ending at 85 C as in mjlab; the
+  winding / housing / structure temperatures are part of the seeded state and
+  the sysID heat model is integrated after every mj_step, as
+  ``envs/g1_recover/thermal.py`` does); or, on a task that ends on leaving K (``k_failure``,
   e.g. ``g1_recover_bench``), K's margin (``k_set.margin_from_terms``: pelvis
   height, tilt, every joint within its range + 0.1 rad, no non-foot contact,
   read as mjlab's termination reads it: the derived pose and contact
@@ -64,7 +68,8 @@ import torch
 
 #: The actor-group terms a rollout can rebuild from MjData.
 OBS_TERMS = ("base_ang_vel", "projected_gravity", "command", "phase", "joint_pos",
-             "joint_vel", "actions", "pelvis_height", "lin_vel_heading", "foot_contact")
+             "joint_vel", "actions", "pelvis_height", "lin_vel_heading", "foot_contact",
+             "motor_temp")
 #: K's constants (``envs/g1_recover/k_set.py``), copied: workers import no sandbox code.
 K_H_MIN, K_H_SCALE, K_THETA_MAX, K_JOINT_OVERSHOOT, K_ANCHOR = 0.45, 0.1, 1.0, 0.1, -0.1
 
@@ -119,6 +124,10 @@ class Spec:
   nonfoot_found_adr: np.ndarray = None
   #: sensordata of the two feet's "found" sensors (the foot_contact term)
   foot_found_adr: np.ndarray = None
+  #: the motor heat model of a *_thermal task (None: no temperatures): the
+  #: sysID repo path, MotorThermal's fields as numpy, per motor the model's
+  #: actuator index and the joint's qvel address, the limit and margin scale
+  thermal: dict = None
 
 
 # --- the parent side: building the spec from a live mjlab env -------------------
@@ -234,14 +243,22 @@ def build_spec(env, actor_path: str, out_dir: str, margin: str = "auto",
   for i in range(nu):
     if m.actuator_trntype[i] != mujoco.mjtTrn.mjTRN_JOINT:
       raise SystemExit(f"[rollout] actuator {i} is not a joint actuator")
-    if m.actuator_biastype[i] != mujoco.mjtBias.mjBIAS_AFFINE:
+    # a position actuator, or a <dcmotor> in POSITION mode (the identified G1:
+    # ctrl is the joint target either way; it keeps no activation state, na = 0)
+    dc_pos = (m.actuator_biastype[i] == mujoco.mjtBias.mjBIAS_DCMOTOR
+              and int(m.actuator_ctrlspec[i]) & int(mujoco.mjtCtrlInput.mjINPUT_POS))
+    if m.actuator_biastype[i] != mujoco.mjtBias.mjBIAS_AFFINE and not dc_pos:
       raise SystemExit(f"[rollout] actuator {i} is not a position actuator")
     jid = int(m.actuator_trnid[i, 0])
     act_index[i] = jnt_of_act.get(int(m.jnt_qposadr[jid]), -1)
+  if m.na:
+    raise SystemExit(f"[rollout] the model has {m.na} actuator states; a rollout seeds none")
   if (act_index < 0).any():
     raise SystemExit(f"[rollout] {int((act_index < 0).sum())} actuators are driven by no action")
   a_scale, a_off = scale[act_index], offset[act_index]
   ctrl_bias = bias[:, tids][:, act_index]
+
+  therm = _thermal_spec(mj, robot)
 
   # the actor group, term by term
   om, key = mj.observation_manager, env.obs_key
@@ -272,12 +289,15 @@ def build_spec(env, actor_path: str, out_dir: str, margin: str = "auto",
       ac = params.get("asset_cfg")
       if ac is not None and getattr(ac, "joint_ids", slice(None)) not in (slice(None), None):
         raise SystemExit("[rollout] joint_pos on a joint subset")
+    elif nm == "motor_temp" and therm is None:
+      raise SystemExit("[rollout] actor term 'motor_temp' but the env has no motor thermal state")
     elif nm == "foot_contact" and params.get("sensor_name") != "feet_ground_contact":
       raise SystemExit(f"[rollout] foot_contact reads {params.get('sensor_name')!r}, not "
                        "feet_ground_contact")
     if size != {"base_ang_vel": 3, "projected_gravity": 3, "command": 3, "phase": 2,
                 "joint_pos": qadr.size, "joint_vel": vadr.size, "actions": tids.size,
-                "pelvis_height": 1, "lin_vel_heading": 3, "foot_contact": 2}[nm]:
+                "pelvis_height": 1, "lin_vel_heading": 3, "foot_contact": 2,
+                "motor_temp": 29}[nm]:
       raise SystemExit(f"[rollout] actor term {nm!r} is {size}-D")
     terms.append((nm, start, size, extra))
     start += size
@@ -303,6 +323,14 @@ def build_spec(env, actor_path: str, out_dir: str, margin: str = "auto",
   z_min = Z_MIN if getattr(avoid, "fall_height_term", True) else -math.inf
   if margin not in ("fall", "k"):
     raise SystemExit(f"[rollout] margin {margin!r}: fall | k | auto")
+  t_margin = getattr(avoid, "thermal", None)
+  if therm is not None:
+    if margin != "fall" or t_margin is None:
+      raise SystemExit("[rollout] a motor thermal state needs the fall margin with its thermal "
+                       "term (g_fall_noheight_thermal)")
+    therm.update(limit_c=float(t_margin["limit_c"]), scale_c=float(t_margin["scale_c"]))
+  elif t_margin is not None:
+    raise SystemExit("[rollout] the margin has a thermal term but the env no thermal state")
   k_extra = {}
   if margin == "k":
     found = _sensor_adr(m, "nonfoot_ground_touch_", "_found")
@@ -330,7 +358,29 @@ def build_spec(env, actor_path: str, out_dir: str, margin: str = "auto",
               force_adr=np.asarray(fadr),
               obs_noise_low=n_lo, obs_noise_high=n_hi,
               z_min=z_min, z_scale=Z_SCALE, tilt_cos=TILT_COS,
-              force_threshold=CONTACT_FORCE_THRESHOLD, clamp=CLAMP, **k_extra)
+              force_threshold=CONTACT_FORCE_THRESHOLD, clamp=CLAMP, thermal=therm, **k_extra)
+
+
+def _thermal_spec(mj, robot) -> dict | None:
+  """The ``Spec.thermal`` of a live env with a motor thermal state, else None."""
+  import dataclasses
+
+  from robot_safety_sandbox.envs.assets.g1_sysid import SYSID_DIR
+  from robot_safety_sandbox.envs.g1_recover.thermal import has_thermal, thermal_state
+  if not has_thermal(mj):
+    return None
+  st = thermal_state(mj)
+  params = {}
+  for f in dataclasses.fields(st.th):
+    v = getattr(st.th, f.name)
+    params[f.name] = _np(v).astype(np.float64).copy() if torch.is_tensor(v) else copy.deepcopy(v)
+  # robot.data.actuator_force / joint_vel index the model's actuators / dofs
+  # through these: motor i -> model actuator, joint dof
+  ctrl_ids = _np(robot.indexing.ctrl_ids).astype(np.int64).reshape(-1)
+  vadr = _np(robot.indexing.joint_v_adr).astype(np.int64).reshape(-1)
+  return dict(sysid_dir=str(SYSID_DIR), params=params,
+              act=ctrl_ids[_np(st.act_perm).astype(np.int64)],
+              vadr=vadr[_np(st.jnt_perm).astype(np.int64)], dt=float(mj.physics_dt))
 
 
 def live_state(env, ids: torch.Tensor):
@@ -338,6 +388,16 @@ def live_state(env, ids: torch.Tensor):
   d = env.mj.sim.data
   return tuple(_np(getattr(d, f))[ids.cpu().numpy()].astype(np.float64)
                for f in ("qpos", "qvel", "qacc_warmstart"))
+
+
+def live_thermal(env, ids: torch.Tensor) -> np.ndarray | None:
+  """``[k, 3, 29]`` winding / housing / structure temperatures of the live envs
+  ``ids`` (float64), or None when the env has no motor thermal state."""
+  from robot_safety_sandbox.envs.g1_recover.thermal import has_thermal, thermal_state
+  if not has_thermal(env.mj):
+    return None
+  st = thermal_state(env.mj)
+  return np.stack([_np(x[ids]).astype(np.float64) for x in st.T], axis=1)
 
 
 # --- the worker side -----------------------------------------------------------
@@ -371,6 +431,13 @@ class Roller:
     self.noise_lo = np.zeros(spec.obs_dim) if lo is None else np.asarray(lo, dtype=np.float64)
     self.noise_span = (np.zeros(spec.obs_dim) if hi is None
                        else np.asarray(hi, dtype=np.float64) - self.noise_lo)
+    #: (slot, r) -> (Tw, Th, Ts) of a *_thermal task's rollout
+    self.temps, self.th = {}, None
+    if spec.thermal is not None:
+      if spec.thermal["sysid_dir"] not in sys.path:
+        sys.path.insert(0, spec.thermal["sysid_dir"])
+      from g1_sysid.thermal import MotorThermal   # numpy only
+      self.th = MotorThermal(**copy.deepcopy(spec.thermal["params"]))
 
   def _d(self, slot: int, r: int = 0) -> mujoco.MjData:
     ds = self.datas[slot]
@@ -378,11 +445,23 @@ class Roller:
       ds.append(mujoco.MjData(self.models[slot]))
     return ds[r]
 
-  def seed(self, slot: int, qpos, qvel, qacc_ws, r: int = 0) -> mujoco.MjData:
+  def seed(self, slot: int, qpos, qvel, qacc_ws, r: int = 0, temps=None) -> mujoco.MjData:
+    """``temps`` ``[3, 29]``: winding / housing / structure (*_thermal tasks)."""
     d = self._d(slot, r)
     mujoco.mj_resetData(self.models[slot], d)
     d.qpos[:], d.qvel[:], d.qacc_warmstart[:] = qpos, qvel, qacc_ws
+    if self.th is not None:
+      if temps is None:
+        raise ValueError("a *_thermal rollout needs the start temperatures")
+      self.temps[(slot, r)] = tuple(np.asarray(t, dtype=np.float64).copy() for t in temps)
     return d
+
+  def _heat(self, d: mujoco.MjData, key) -> None:
+    """One physics substep of the heat model (``thermal.MotorThermalState.step``)."""
+    th, t = self.th, self.s.thermal
+    tau = th.motor_torque(d.actuator_force[t["act"]].astype(np.float64))
+    w = th.motor_speed(d.qvel[t["vadr"]].astype(np.float64))
+    self.temps[key] = th.step(self.temps[key], tau, w, t["dt"])
 
   def control_step(self, slot: int, a: np.ndarray, r: int = 0) -> float:
     """``a`` (env action units) for one control step; returns g after it."""
@@ -401,9 +480,18 @@ class Roller:
     peak = 0.0
     for _ in range(s.decimation):
       mujoco.mj_step(m, d)
+      if self.th is not None:
+        self._heat(d, (slot, r))
       f = d.sensordata[s.force_adr[:, None] + np.arange(3)]
       peak = max(peak, float(np.sqrt((f * f).sum(1)).max()))
-    return self.margin(d, peak)
+    g = self.margin(d, peak)
+    if self.th is not None:
+      t = s.thermal
+      hottest = float(self.temps[(slot, r)][0].max())
+      g = min(g, float(np.clip((t["limit_c"] - hottest) / t["scale_c"], -s.clamp, s.clamp)))
+      if hottest >= t["limit_c"]:     # mjlab's motor_overheat termination: the hook's anchor
+        g = min(g, K_ANCHOR)
+    return g
 
   def margin_k(self, d: mujoco.MjData) -> float:
     """K's margin (``k_set.margin_from_terms``) as mjlab's termination reads it
@@ -465,6 +553,8 @@ class Roller:
         c, sn = math.cos(yaw), math.sin(yaw)
         v = d.qvel[s.root_vadr:s.root_vadr + 3]       # free joint: world linear velocity
         seg[:] = (c * v[0] + sn * v[1], -sn * v[0] + c * v[1], v[2])
+      elif nm == "motor_temp":
+        seg[:] = self.temps[(slot, r)][0]
       elif nm == "foot_contact":
         # after a control step, the flags of its last substep (mjlab's sensor
         # cache); from a seeded state, the current ones
@@ -473,7 +563,7 @@ class Roller:
         seg[:] = (found > 0).astype(np.float64)
 
   def rollout(self, slots, qpos, qvel, qacc_ws, a_first, horizon: int,
-              n_rollouts: int = 1, noise: bool = False, trace: bool = False):
+              n_rollouts: int = 1, noise: bool = False, trace: bool = False, temps=None):
     """Every slot's ``n_rollouts`` rollouts in lockstep: ``a_first`` [k, A]
     for one control step, then the fallback, ``horizon`` control steps in all;
     with ``noise`` the fallback reads its observation through the env's sensor
@@ -483,7 +573,8 @@ class Roller:
     ``t_fail`` [k] (the control step g first went < 0 in any rollout, counted
     from 1; ``horizon + 1`` if never); with ``trace`` (one rollout only) also
     the per-step g and qpos ([k, horizon], [k, horizon, nq]; NaN after a
-    failure)."""
+    failure). ``temps`` [k, 3, 29]: the start temperatures of a *_thermal
+    task (``live_thermal``)."""
     R = max(1, int(n_rollouts))
     if trace and R != 1:
       raise ValueError("trace is for single rollouts")
@@ -500,7 +591,8 @@ class Roller:
     q_tr = None
     for j in range(n):
       i = owner[j]
-      self.seed(slots[i], qpos[i], qvel[i], qacc_ws[i], rep[j])
+      self.seed(slots[i], qpos[i], qvel[i], qacc_ws[i], rep[j],
+                None if temps is None else temps[i])
     if trace:
       q_tr = np.full((k, horizon, self._d(slots[0]).qpos.size), np.nan)
     for t in range(horizon):
@@ -540,8 +632,9 @@ def _worker(conn, spec: Spec, slots, seed: int) -> None:
     msg = conn.recv()
     if msg is None:
       break
-    sl, qpos, qvel, ws, a0, horizon, n_rollouts, noise = msg
-    conn.send(roller.rollout(list(sl), qpos, qvel, ws, a0, horizon, n_rollouts, noise))
+    sl, qpos, qvel, ws, a0, horizon, n_rollouts, noise, temps = msg
+    conn.send(roller.rollout(list(sl), qpos, qvel, ws, a0, horizon, n_rollouts, noise,
+                             temps=temps))
   conn.close()
 
 
@@ -577,9 +670,10 @@ class CpuRolloutPool:
         raise RuntimeError("a rollout worker failed to start")
 
   def rollout(self, slots, qpos, qvel, qacc_ws, a_first, horizon: int,
-              n_rollouts: int = 1, noise: bool = False):
-    """``slots`` [k] env ids (numpy / list); state and ``a_first`` [k, ...].
-    Returns ``gmin`` [k], ``t_fail`` [k] (see :meth:`Roller.rollout`)."""
+              n_rollouts: int = 1, noise: bool = False, temps=None):
+    """``slots`` [k] env ids (numpy / list); state and ``a_first`` [k, ...];
+    ``temps`` [k, 3, 29] on a *_thermal task (``live_thermal``). Returns
+    ``gmin`` [k], ``t_fail`` [k] (see :meth:`Roller.rollout`)."""
     slots = np.asarray(slots, dtype=np.int64)
     k = slots.size
     gmin = np.empty(k)
@@ -589,7 +683,7 @@ class CpuRolloutPool:
       sel = np.flatnonzero(slots % self.workers == w)
       if sel.size:
         c.send((slots[sel], qpos[sel], qvel[sel], qacc_ws[sel], a_first[sel], int(horizon),
-                int(n_rollouts), bool(noise)))
+                int(n_rollouts), bool(noise), None if temps is None else temps[sel]))
         asked.append((c, sel))
     for c, sel in asked:
       g, t = c.recv()
