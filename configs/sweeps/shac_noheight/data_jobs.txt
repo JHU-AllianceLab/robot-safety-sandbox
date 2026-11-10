@@ -1,0 +1,10 @@
+# The start bank of the no-pelvis-height ablation: the recipe of the experiment's
+# data/g1_sonic_push_gfall_train_bank_net.pt (configs/g1_recover_sonic_safetyshac1p.yaml
+# header) rebuilt from data/g1_sonic_push_gfall_arch_train.pt, the same SONIC harvest
+# (train clips, seed 0, 50k episodes, kick |dv| ~ U(0, 5) m/s, g1_recover_lafan's fall
+# terminations) on the cluster's GPU (configs/sweeps/shac_vs_ppo_sonic/
+# policy_eval_states.txt). Rows 0 / 0.1 / 0.2 / 0.3 s after the kick, then the eta = 0.1
+# net with the bank's own W. The workstation bank had 199103 rows.
+# One GPU (the thinning runs on cuda), in order; prep_and_smoke.sh runs it.
+python examples/harvest_g1_sonic_trajectories.py --from-traj data/g1_sonic_push_gfall_arch_train.pt --bank-delays-s 0 0.1 0.2 0.3 --bank-out data/g1_sonic_push_gfall_arch_train_bank.pt  # creates: data/g1_sonic_push_gfall_arch_train_bank.pt
+python examples/dedup_start_bank.py --bank data/g1_sonic_push_gfall_arch_train_bank.pt  # creates: data/g1_sonic_push_gfall_arch_train_bank_net.pt

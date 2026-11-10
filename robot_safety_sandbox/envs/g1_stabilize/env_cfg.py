@@ -137,6 +137,27 @@ def g_fall(env) -> torch.Tensor:
   return torch.stack(terms, dim=0).amin(dim=0)
 
 
+#: what a CPU rollout must reproduce (cpu_rollout.build_spec reads it)
+g_fall.fall_height_term = True
+
+
+def g_fall_noheight(env) -> torch.Tensor:
+  """``g_fall`` without its pelvis-height term: pelvis tilt and non-foot ground
+  contact only (the no-pelvis-height ablation, tasks ``g1_recover*_noheight``).
+  The terminations never read the height (70 deg tilt, 10 N non-foot contact),
+  so g < 0 still covers every terminal state. Unclamped; ``compose`` clamps."""
+  d = env.scene["robot"].data
+  up = -d.projected_gravity_b[:, 2]
+  terms = [(up - TILT_COS) / TILT_NORM]
+  contact = _nonfoot_contact_margin(env)
+  if contact is not None:
+    terms.append(contact)
+  return torch.stack(terms, dim=0).amin(dim=0)
+
+
+g_fall_noheight.fall_height_term = False
+
+
 #: The old private name; ``envs/g1_waist`` builds its own margins on it.
 _g_fall = g_fall
 

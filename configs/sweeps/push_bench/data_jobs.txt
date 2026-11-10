@@ -1,0 +1,14 @@
+# The SONIC push benchmark rebuilt in mjlab -- its data (README.md). In order, one GPU:
+#   sbatch -A hhu49_alliance1 -p rtx6000,l40s,h100 --gres=gpu:1 --cpus-per-task=8 --mem=48G --time=03:00:00 \
+#       --job-name=push_bench_data --output=logs/slurm/%x_%j.out --wrap "source $HOME/miniforge3/etc/profile.d/conda.sh && conda activate mjlab && examples/run_jobs.sh configs/sweeps/push_bench/data_jobs.txt"
+# 1. the clip library of his three training motions (dance1_subject1 cut at 105 s)
+python examples/subset_clip_library.py --clips walk1_subject1 run1_subject2 dance1_subject1 --end-s dance1_subject1=105 --out data/g1_lafan1_clips_bench_train.pt  # creates: data/g1_lafan1_clips_bench_train.pt
+# 2. SONIC in the bench world under his state pool's force push (12 bodies, a surface point,
+#    5-15 ticks, dv 0.5-2.5 m/s, onset 1-2 s after the spawn), and the start bank: rows 0 / 0.1 /
+#    0.2 / 0.3 s after the push ENDS
+python examples/harvest_g1_sonic_trajectories.py --task g1_recover_bench --library data/g1_lafan1_clips_bench_train.pt --sonic-dir $HOME/gear_sonic_hf --push force --push-ticks 5 15 --dv-range 0.5 2.5 --onset-s 1.0 2.0 --episodes 50000 --seed 0 --out data/g1_bench_push_train.pt  # creates: data/g1_bench_push_train.pt data/g1_bench_push_train_bank.pt
+# 3. its eta = 0.1 net: the training bank of configs/g1_recover_bench_*.yaml
+python examples/dedup_start_bank.py --bank data/g1_bench_push_train_bank.pt  # creates: data/g1_bench_push_train_bank_net.pt
+# 4. trial tables (CPU): his training-motion table regenerated, and the WM-tube calibration table
+python examples/make_push_table.py --preset train --out data/push_bench/train_v1  # creates: data/push_bench/train_v1/trials.csv
+python examples/make_push_table.py --preset calib --out data/push_bench/calib_v1  # creates: data/push_bench/calib_v1/trials.csv

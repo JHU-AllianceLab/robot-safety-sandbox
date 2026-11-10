@@ -21,6 +21,15 @@ Q^pi(s, a); a recurrent policy's memory then starts at s', where it takes
 over. A row's k rollouts differ by the env's domain randomization (foot
 friction, torso CoM, encoder bias: one draw per env).
 
+``--q-center pi`` (with ``--mode q``, ``--k 1``) centres the first action on
+the POLICY's own action instead of SONIC's: it plays pi(s) (clamped to the
+action box, as every later step) plus the row's noise ``q_action -
+sonic_action``, so a state's pi rows carry the same noise draws as its SONIC
+rows, and pi's variant 0 is pi's own action (its label is V^pi(s)). pi(s) is
+only known once the env has restored s, so the played actions are written to
+the output as ``q_action`` [R, 29] (NaN for unlabelled rows), which
+``fit_policy_value.py --with-pi`` reads in place of the states file's.
+
 The spawn walks the file with the SEQUENTIAL sampler, each row k times in a
 row, and an ending episode is booked on the row it started from (the
 attribution of ``label_start_states.py``: only first-pass episodes, the first
@@ -62,6 +71,9 @@ def _parse(argv=None):
   p.add_argument("--policy", required=True)
   p.add_argument("--states", required=True)
   p.add_argument("--mode", choices=("v", "q"), default="v")
+  p.add_argument("--q-center", choices=("row", "pi"), default="row",
+                 help="--mode q: play the row's q_action (row), or pi's own action plus "
+                      "the row's noise q_action - sonic_action (pi)")
   p.add_argument("--out", default=None)
   p.add_argument("--k", type=int, default=1, help="rollouts per row")
   p.add_argument("--task", default="g1_recover_lafan_k")
@@ -71,9 +83,12 @@ def _parse(argv=None):
   p.add_argument("--seed", type=int, default=0)
   p.add_argument("--device", default="cuda:0")
   a = p.parse_args(argv)
+  if a.q_center == "pi" and (a.mode != "q" or a.k != 1):
+    p.error("--q-center pi needs --mode q and --k 1 (one played action per row)")
   if a.out is None:
     tag = os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(a.policy)))) or "policy"
-    a.out = f"{os.path.splitext(a.states)[0]}_labels_{tag}.pt"
+    pi = "_pi" if a.q_center == "pi" else ""
+    a.out = f"{os.path.splitext(a.states)[0]}{pi}_labels_{tag}.pt"
   return a
 
 
@@ -93,7 +108,11 @@ def _rank_in_group(r: torch.Tensor) -> torch.Tensor:
   return out
 
 
-def rollouts(env, model, norm, margin_fn, R: int, k: int, q_action, max_rows) -> dict:
+def rollouts(env, model, norm, margin_fn, R: int, k: int, q_action, max_rows,
+             q_noise=None) -> dict:
+  """``q_action`` [R, 29]: the first action per row; ``q_noise`` [R, 29]
+  instead: the first action is the policy's own plus the row's noise, and the
+  played actions come back as ``q_action`` (``--q-center pi``)."""
   mj, dev, n = env.mj, env.device, env.num_envs
   dt = float(mj.step_dt)
   low = torch.as_tensor(env.action_space.low, device=dev)
@@ -112,15 +131,24 @@ def rollouts(env, model, norm, margin_fn, R: int, k: int, q_action, max_rows) ->
   first = (int(mj._zoo_spawn_cursor) - n + ar) < seq_len
   vmin = margin_fn(mj)[0].clone()              # g at the restored state
   elapsed = torch.zeros(n, dtype=torch.long, device=dev)
+  played = (torch.full((R, q_noise.shape[1]), float("nan"), device=dev)
+            if q_noise is not None else None)
   reset_policy_memory(model.policy)
   remaining, it, since, t0 = n_target, 0, 0, time.time()
   stall = 3 * int(mj.max_episode_length) + 10
   while remaining > 0:
     with torch.no_grad():
       act = torch.clamp(model.policy._predict(norm(obs), deterministic=True), low, high)
-    if q_action is not None:
+    if q_action is not None or q_noise is not None:
       over = elapsed == 0
-      act = torch.where(over.unsqueeze(1), q_action[cur_row.clamp_min(0)], act)
+      if q_noise is not None:
+        first_act = act + q_noise[cur_row.clamp_min(0)]
+        # the action a first-pass row is labelled with (k = 1: one per row)
+        mine = over & first & (cur_row >= 0)
+        played[cur_row[mine]] = first_act[mine]
+      else:
+        first_act = q_action[cur_row.clamp_min(0)]
+      act = torch.where(over.unsqueeze(1), first_act, act)
       reset_policy_memory(model.policy, over)    # the policy takes over at s'
     cursor = int(mj._zoo_spawn_cursor)
     obs, g, dones, timeouts, _l = env.step_tensor(act)
@@ -156,8 +184,11 @@ def rollouts(env, model, norm, margin_fn, R: int, k: int, q_action, max_rows) ->
       el = max(time.time() - t0, 1e-6)
       print(f"[values] step {it}  rows done {n_target - remaining}/{n_target}  "
             f"({it * n / el:.0f} env-steps/s)", flush=True)
-  return {"v": v_out.cpu(), "ttf": t_out.cpu(), "n_rows": n_target,
-          "wall_s": time.time() - t0, "env_steps": it * n}
+  out = {"v": v_out.cpu(), "ttf": t_out.cpu(), "n_rows": n_target,
+         "wall_s": time.time() - t0, "env_steps": it * n}
+  if played is not None:
+    out["q_action"] = played.cpu()
+  return out
 
 
 def main(argv=None):
@@ -167,11 +198,15 @@ def main(argv=None):
   bank = load_bank(a.states, "cpu")
   raw = torch.load(a.states, map_location="cpu", weights_only=False)
   R = int(bank["root_z"].numel())
-  q_action = None
+  q_action = q_noise = None
   if a.mode == "q":
     if "q_action" not in raw:
       raise SystemExit(f"{a.states} has no q_action column (use a *_q.pt file)")
     q_action = raw["q_action"].float().to(dev)
+    if a.q_center == "pi":
+      if "sonic_action" not in raw:
+        raise SystemExit(f"{a.states} has no sonic_action column (build_policy_eval_states.py)")
+      q_noise, q_action = q_action - raw["sonic_action"].float().to(dev), None
   model, norm = load_twin(a.policy, dev)
   model.policy.set_training_mode(False)
   overrides = dict(dataset=a.states, sampler="sequential", sequential_repeats=int(a.k),
@@ -180,19 +215,29 @@ def main(argv=None):
                  horizontal=True, max_pushes=0)
   env = make_tensor(a.task, a.num_envs, dev, cfg_overrides=overrides, random_push=push_kw)
   print(f"[values] {a.policy} on {a.task} x {a.num_envs}: {R} rows x {a.k} rollouts, "
-        f"mode {a.mode}, horizon {a.horizon_s} s")
-  out = rollouts(env, model, norm, spec(a.task).margin_fn, R, a.k, q_action, a.max_rows)
+        f"mode {a.mode}{' (pi-centred)' if q_noise is not None else ''}, horizon {a.horizon_s} s")
+  out = rollouts(env, model, norm, spec(a.task).margin_fn, R, a.k, q_action, a.max_rows, q_noise)
   v = out["v"]
   res = {"v": v, "safe": v >= 0.0, "ttf": out["ttf"],
          "meta": {"source": "label_policy_values.py", "policy": os.path.abspath(a.policy),
-                  "states": os.path.abspath(a.states), "mode": a.mode, "task": a.task,
+                  "states": os.path.abspath(a.states), "mode": a.mode, "q_center": a.q_center,
+                  "task": a.task,
                   "horizon_s": a.horizon_s, "k": a.k, "rows": R, "rows_labeled": out["n_rows"],
                   "env_steps": out["env_steps"], "wall_s": out["wall_s"],
                   "created": time.strftime("%Y-%m-%d %H:%M:%S")}}
+  if "q_action" in out:
+    res["q_action"] = out["q_action"]
   torch.save(res, a.out)
   lab = ~torch.isnan(v)
   print(f"[values] {int(lab.sum())} rollouts: safe {float((v[lab] >= 0).float().mean()):.3f}, "
         f"mean v {float(v[lab].mean()):+.3f} -> {a.out} ({out['wall_s']:.0f}s)")
+  if "q_action" in out:
+    qa = out["q_action"]
+    miss = int((torch.isnan(qa).any(1) & lab[:, 0]).sum())
+    if miss:
+      raise SystemExit(f"[values] {miss} labelled rows have no played action")
+    gap = (qa - raw["sonic_action"].float()).norm(dim=1)
+    print(f"[values] played actions: ||a - sonic_action|| median {float(gap[lab[:, 0]].median()):.2f}")
   env.close()
 
 

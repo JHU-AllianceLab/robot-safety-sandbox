@@ -1,0 +1,194 @@
+# E8 of docs/experiments/g1-lafan-recovery.md: the wave-2 arms C and C-push
+# repeated with the MODEL-BASED learner (SafetySHAC1P), at E7's budget (1.5B
+# env steps, 3 seeds), evaluated with the same frozen push suite as the PPO
+# runs and reported next to them.
+#
+#   python examples/make_sweep.py --sweep configs/sweeps/lafan_recovery_shac.yaml
+#   examples/run_jobs.sh configs/sweeps/lafan_recovery_shac/prep_jobs.txt
+#   examples/run_jobs.sh configs/sweeps/lafan_recovery_shac/jobs.txt
+#   examples/run_jobs.sh configs/sweeps/lafan_recovery_shac/eval_jobs.txt
+#   examples/run_jobs.sh configs/sweeps/lafan_recovery_shac/report_jobs.txt
+#
+# NO PUSH INSIDE AN EPISODE. SHAC's world model is deterministic and is not
+# told about pushes (examples/train_model_based.py refuses a push task), so
+# every push of C / C-push moves BEFORE the episode, into the start state, and
+# the arms train on plain g1_recover (no push process at all):
+#
+#   C       70 % P-pre-nominal handovers + 30 % the walker-bank mixture, no
+#           other push. PPO's rows carried their pending push into the episode
+#           (handover 0-0.2 s after the push ONSET); here the bank is the same
+#           harvest with the takeover 0-0.2 s after the push ENDS
+#           (harvest_g1_handover_states.py --handover-from end): same clips,
+#           impulses and durations, the whole push on the replay.
+#   C-push  C with every walker-bank start pushed. PPO's walker rows got one
+#           push 0.1-0.4 s after the spawn (300 N x the per-env survival
+#           scale); here the warm start rides that push from the same walker
+#           mixture (g1_recover_lafan's own push process, scale U(0.2, 1)) and
+#           the learner takes over 0-0.2 s after it ends
+#           (harvest_g1_frontier_states.py --kind handover). Both banks are
+#           KIND_HANDOVER rows drawn uniformly from ONE pool, so their row
+#           counts (100000 : 42857) set the 70 : 30 split.
+#
+# The test is unchanged: the frozen suite (std / lafan / handover / walker /
+# pre) pushes INSIDE the episode, as it did for PPO, so it also measures how
+# far a policy trained only on post-push starts carries to a push it is under.
+#
+# SHARED with PPO's C / C-push (configs/sweeps/lafan_recovery_e7.yaml): the
+# warm start (push_fast_privcrit: actor, privileged critic, obs normalizer),
+# num_envs, steps, gamma 0.99 fixed, the 512-256-128 nets, the privileged
+# critic, the action-penalty weights (value units here, so compare the
+# policies' action statistics, not the coefficients), the 3 s episode with the
+# rest truncation, and (SHAC-C) the walker sources' level ladder. The SHAC recipe is
+# configs/g1_recover_safetyshac1p.yaml's (warm-started) with the LR cosine
+# over the whole run. PPO-only knobs (critic_warmup_steps, target_kl,
+# ent_coef, max_std, the force curricula) have no counterpart.
+#
+# BUDGET: SHAC ran ~31k env-steps/s on the RTX 5080 (TF32), so ~13 h per run
+# there; submit with a longer --time than slurm_jobs.sbatch's 6 h.
+#
+# EDIT THIS FILE, not the generated configs (they are overwritten).
+
+name: lafan_recovery_shac
+runs_root: runs/lafan_recovery
+config_dir: configs/sweeps/lafan_recovery_shac
+seeds: [0, 1, 2]
+
+# --- SHAC-C --------------------------------------------------------------------------
+base:
+  family: model_based
+  task: g1_recover
+  num_envs: 4096
+  steps: 1500000000
+  load: runs/g1_recover_push_fast_privcrit/g1_recover_push_fast/final_model.zip
+  # the warm start has no world model: fit one first, then let the critic
+  # adapt to imagined returns with the actor held
+  wm_warmup_iters: 3000
+  actor_delay_iters: 500
+  norm_freeze_steps: 5000000
+  privileged_critic: true
+  gamma: 0.99
+  gamma_anneal: false
+  gae_lambda: 0.95
+  softmin_tau: 0.0
+  action_rate_coef: 0.05
+  action_mag_coef: 0.005
+  net: "512,256,128"
+  wm_net: "1024,1024,1024"
+  wm_head_net: "256,256"
+  lr: 2.0e-4
+  # = the run's iterations: 1.5B / (4096 envs x 2.5 vector steps at utd 0.4)
+  lr_decay_iters: 146500
+  lr_min_frac: 0.03
+  horizon: 32
+  imagine_batch: 4096
+  action_noise_std: 0.1
+  wm_window: 8
+  wm_batch: 2048
+  wm_gradient_steps: 10
+  critic_epochs: 5
+  critic_minibatches: 4
+  utd_ratio: 0.4
+  learning_starts: 64
+  replay_size: 500
+  tf32: true
+  log_interval: 50
+  # a SHAC checkpoint carries the world model and its optimizer (~25x a PPO one)
+  checkpoint_every: 100000000
+  video_interval: 100000000
+  video_seconds: 20
+  video_fps: 50
+  video_wandb: false
+  env_overrides:
+    dataset: [data/g1_recover_states.pt, data/g1_handover_postpush_train.pt]
+    weights: {nominal: 0.03, clean: 0.06, pushed: 0.075, fell: 0.09,
+              synthetic: 0.045, mocap: 0.0, handover: 0.70}
+    levels: 5
+    band_width: 0.4
+    init_level: 2
+    episode_length_s: 3.0
+    rest_terminate: true
+    rest_dwell_s: 0.4
+    rest_arm_s: 0.8
+    # no push process: the gate is always open, but it keeps C's rest target
+    rest_gate_on_push: true
+    sampler: uniform
+
+# --- smoke variant (make_sweep.py --smoke) ----------------------------------------
+# After the prep jobs (it reads their banks): every arm builds, warm-starts,
+# fits the model, moves the actor and writes its final model.
+smoke:
+  runs_root: runs/smoke/lafan_recovery_shac
+  config_dir: configs/sweeps/lafan_recovery_shac_smoke
+  seeds: [0]
+  config:
+    steps: 3000000
+    num_envs: 1024
+    wm_warmup_iters: 100
+    actor_delay_iters: 50
+    lr_decay_iters: 1200
+    replay_size: 200
+    checkpoint_every: 100000000
+    video_interval: 100000000
+  train_flags: [--no-wandb]
+  eval_flags: [--quick]
+
+# --- evaluation ----------------------------------------------------------------------
+# The PPO evaluation as it ran: the frozen grid, all five settings, the same
+# baselines (their evals exist under the same runs_root, so they are skipped).
+eval:
+  grid_file: configs/sweeps/lafan_recovery/eval_grid.yaml
+  settings: [std, lafan, handover, walker, pre]
+  baselines:
+    push_fast_privcrit: runs/g1_recover_push_fast_privcrit/g1_recover_push_fast/final_model.zip
+    push_rear: runs/g1_recover_push_rear/g1_recover_push_rear/final_model.zip
+  # the PPO arms this sweep repeats, read from their existing evals (there is
+  # no PPO C at 1.5B: E7 ran C-push only)
+  compare:
+    PPO-C-500M_s0: runs/lafan_recovery/E6/C_s0/eval_frozen
+    PPO-C-500M_s1: runs/lafan_recovery/E6/C_s1/eval_frozen
+    PPO-C-push-500M_s0: runs/lafan_recovery/E6/C-push_s0/eval_frozen
+    PPO-C-push-500M_s1: runs/lafan_recovery/E6/C-push_s1/eval_frozen
+    PPO-C-push-1.5B_s0: runs/lafan_recovery/E7/C-push_s0/eval_frozen
+    PPO-C-push-1.5B_s1: runs/lafan_recovery/E7/C-push_s1/eval_frozen
+    PPO-C-push-1.5B_s2: runs/lafan_recovery/E7/C-push_s2/eval_frozen
+
+# --- prerequisites (prep_jobs.txt, in this order) ---------------------------------
+# ${load} is base.load (the warm start rides the pushes and labels the rows).
+prep_vars:
+  # lafan_recovery.yaml's: the P-pre-nominal impulses (N s) and C-push's push
+  # ceiling (N)
+  handover_impulse_range: "4 60"
+  force_max: 300
+prep:
+  - name: harvest_handover_postpush
+    note: the P-pre-nominal harvest (data/g1_handover_train.pt's recipe) with the takeover 0-0.2 s after the push ENDS
+    cmd: >-
+      python examples/harvest_g1_handover_states.py --library data/g1_lafan1_clips_train.pt
+      --policy ${load} --impulse-range ${handover_impulse_range} --handover-from end
+      --samples 100000 --out data/g1_handover_postpush_train.pt
+    creates: [data/g1_handover_postpush_train.pt]
+  - name: harvest_walker_postpush
+    note: C-push's walker starts, pushed under the warm start (one push 0.1-0.4 s in), the takeover 0-0.2 s after it ends
+    cmd: >-
+      python examples/harvest_g1_frontier_states.py --policy ${load}
+      --task g1_recover_lafan --dataset data/g1_recover_states.pt
+      --weights '{"nominal": 0.1, "clean": 0.2, "pushed": 0.25, "fell": 0.3, "synthetic": 0.15, "mocap": 0, "handover": 0}'
+      --init-level 2 --force-max ${force_max} --min-scale 0.2 --delays 0 2 5 7 10
+      --kind handover --samples 42857 --out data/g1_walker_postpush_train.pt
+    creates: [data/g1_walker_postpush_train.pt]
+
+# --- experiments ---------------------------------------------------------------------
+experiments:
+  E8:
+    title: SHAC on the wave-2 arms, 1.5B steps (6 runs)
+    arms:
+      SHAC-C:
+        note: C with the handover taken after the push ends, no push in the episode
+        config: {}
+      SHAC-C-push:
+        note: SHAC-C with the walker starts pushed before the episode (warm start under the push)
+        config:
+          env_overrides:
+            dataset: [data/g1_handover_postpush_train.pt, data/g1_walker_postpush_train.pt]
+            weights: {nominal: 0.0, clean: 0.0, pushed: 0.0, fell: 0.0,
+                      synthetic: 0.0, mocap: 0.0, handover: 1.0}

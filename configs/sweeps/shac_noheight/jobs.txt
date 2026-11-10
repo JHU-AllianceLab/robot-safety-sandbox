@@ -1,0 +1,14 @@
+# The NO-PELVIS-HEIGHT ablation of SHAC on SONIC's post-kick states: the SHAC arm of
+# configs/sweeps/shac_vs_ppo_sonic/jobs.txt (whose runs the WM-filter report
+# runs/shac_vs_ppo_sonic/wmreport evaluates), same recipe, 1.5B env steps, 3 seeds,
+# with the pelvis height out of the margin and the critic group / world-model state
+# (task g1_recover_noheight; configs/g1_recover_sonic_noheight_safetyshac1p.yaml).
+#
+# Order: prep_and_smoke.sh (the bank, data_jobs.txt, and a smoke test), then this
+# file as an array, then wmreport_jobs.txt (wmreport_seed.sh) and the report:
+#   sbatch -A hhu49_alliance1 -p rtx6000 --array=1-3 --time=20:00:00 --mem=64G \
+#       --job-name=shac_noheight examples/slurm_jobs.sbatch configs/sweeps/shac_noheight/jobs.txt
+# ~13 h per seed on an RTX PRO 6000 (the originals: 12:58-13:15).
+python examples/train.py --config configs/g1_recover_sonic_noheight_safetyshac1p.yaml --seed 0 --wandb-project shac_vs_ppo_sonic --out runs/shac_noheight/shac_s0
+python examples/train.py --config configs/g1_recover_sonic_noheight_safetyshac1p.yaml --seed 1 --wandb-project shac_vs_ppo_sonic --out runs/shac_noheight/shac_s1
+python examples/train.py --config configs/g1_recover_sonic_noheight_safetyshac1p.yaml --seed 2 --wandb-project shac_vs_ppo_sonic --out runs/shac_noheight/shac_s2

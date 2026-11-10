@@ -64,7 +64,7 @@ from .core import SafetyFilter
 from .fallback import Fallback, PolicyFallback, ZeroFallback
 from .intervention import (
   HeuristicSmoothingIntervention, Intervention, LeastRestrictiveIntervention,
-  OptIntervention, QCBFIntervention)
+  OptIntervention, QCBFDescentIntervention, QCBFIntervention)
 from .monitor import (
   AdversarialRolloutMonitor, CriticMonitor, Monitor, RolloutMonitor,
   ValueMonitor)
@@ -79,6 +79,7 @@ __all__ = [
   "AdversarialRolloutMonitor",
   "Intervention", "LeastRestrictiveIntervention",
   "HeuristicSmoothingIntervention", "OptIntervention", "QCBFIntervention",
+  "QCBFDescentIntervention",
   "ShadowSim", "MjlabShadowSim", "RolloutStep", "sync_env_state",
   "safety_value_filter", "safety_critic_filter", "qcbf_filter",
   "rollout_filter", "gameplay_filter",

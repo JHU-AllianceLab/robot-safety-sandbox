@@ -1,0 +1,10 @@
+# SHAC's model-based Q (its world model + critic, examples/score_world_model_q.py)
+# against the exact 3 s labels of the held-out test states
+# (data/policy_eval_gfall/test_q.pt), next to the fitted Q / V nets: safe-vs-unsafe
+# separation, which of a state's two labelled actions is safer, the world model's
+# one-step error under u_SONIC and under pi(s), and SHAC's critic against V's labels.
+# One GPU each, ~5 min. Outputs: data/policy_eval_gfall/model_q_<tag>.{json,pt}.
+#   sbatch -A hhu49_alliance1 -p rtx6000,l40s,h100 --array=1-3 --time=00:30:00 --job-name=model_q examples/slurm_jobs.sbatch configs/sweeps/shac_vs_ppo_sonic/model_q_jobs.txt
+python examples/score_world_model_q.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --tag shac_s0  # creates: data/policy_eval_gfall/model_q_shac_s0.json
+python examples/score_world_model_q.py --policy runs/shac_vs_ppo_sonic/shac_s1/g1_recover_safetyshac1p/final_model.zip --tag shac_s1  # creates: data/policy_eval_gfall/model_q_shac_s1.json
+python examples/score_world_model_q.py --policy runs/shac_vs_ppo_sonic/shac_s2/g1_recover_safetyshac1p/final_model.zip --tag shac_s2  # creates: data/policy_eval_gfall/model_q_shac_s2.json

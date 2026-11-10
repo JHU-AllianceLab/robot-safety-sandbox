@@ -1,0 +1,20 @@
+# A SONIC start bank on three LAFAN clips only: walk1_subject1, run1_subject2,
+# dance1_subject1 (data/g1_lafan1_clips_3clips.pt, cut from data/g1_lafan1_clips.pt
+# with split_lafan_clips.split_bank). The other LAFAN clips are left for testing.
+# SONIC's reference is rebuilt from the clip CSVs in the library's meta["csv_dir"]:
+# in this library it is the cluster's data/lafan1_g1 (the workstation-built
+# libraries still name /home/yuanhong/..., and fail here).
+#
+# The recipe of data/g1_sonic_push_gfall_train_bank_net.pt (docs/experiments/
+# shac-ppo-sonic.md, section 5) with only the library changed: SONIC tracks a clip
+# from a library frame, a pelvis velocity kick |dv| ~ U(0, 5) m/s in a random
+# direction lands 0.5-1.5 s in, and a row is recorded 0 / 0.1 / 0.2 / 0.3 s after
+# it if SONIC is still up, under g1_recover's own fall terminations (g_fall, not
+# K). 50,000 episodes, as the train bank, then the eta-net thinning with the
+# bank's own W.
+#
+# Both steps run in order, on one GPU (the cluster's SONIC release is in
+# ~/gear_sonic_hf, not the harvester's default ~/Documents/gear_sonic_hf):
+#   examples/run_jobs.sh configs/sweeps/sonic_3clips_bank/jobs.txt
+python examples/harvest_g1_sonic_trajectories.py --task g1_recover_lafan --library data/g1_lafan1_clips_3clips.pt --sonic-dir $HOME/gear_sonic_hf --episodes 50000 --seed 0 --out data/g1_sonic_push_gfall_3clips.pt
+python examples/dedup_start_bank.py --bank data/g1_sonic_push_gfall_3clips_bank.pt  # creates: data/g1_sonic_push_gfall_3clips_bank_net.pt

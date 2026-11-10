@@ -1,0 +1,31 @@
+# Smoke test of examples/eval_sonic_qcbf.py (--quick) with ppo_s0 as pi, on one GPU.
+#   push: 256 envs, 512 episodes under sonic, qcbf:exact:0.7, lrsf:td_g099 and
+#     fallback (every controller kind, both value fits).
+#   badref: the scenarios hf_osc_4hz_0.6, lean_fwd_30 and teleport, 256 episodes
+#     each, under sonic and qcbf:{exact,td_g099}:0.7.
+# Outputs go to runs/shac_vs_ppo_sonic/qcbf_eval_smoke/ppo_s0/. Estimated time is
+# ~10 min: ~5 min of setup, and a qcbf step stays at ~50 ms even at 256 envs.
+# What to check:
+#   - the log's per-wave env-steps/s (the filter's cost; rescale the estimate in
+#     qcbf_eval_jobs.txt's header with it);
+#   - push.json conditions.<qcbf>.intervention: status_post (the pass / gd /
+#     segment / best_effort mix), rate_pre (false alarms), dev_per_engaged_post
+#     (a step's deviation is <= sqrt(29) = 5.39 except on best-effort steps),
+#     trust_region_per_engaged_post and
+#     fallback_infeasible_per_engaged_post;
+#   - the log's "pi's last-action input clamped on ..." share (meta runs.*.pi_obs_clamped);
+#   - sonic's by_dv SR. The harvester's "about half survive at |dv| ~ 2.8 m/s" was
+#     measured under other rules, so expect a different level, not that one: it ran
+#     g1_recover_lafan_k (leaving K, i.e. 0.45 m / 1 rad / any non-foot floor contact,
+#     ends the episode; here only fell_over at 70 deg or a 10 N non-foot contact
+#     does), a 2.5 s window (4 s here), and it dropped pre-push falls (here they
+#     count as failures: compare after excluding the episodes with fell_pre).
+#     The check is that SR falls with |dv|; its level under these rules is new;
+#   - badref.json exists (it is written only once every scenario has run).
+# Job 2 tabulates the smoke's outputs with examples/summarize_sonic_qcbf.py
+# (CPU only, seconds): run the file again once job 1 is done, and job 1 is
+# skipped (its outputs exist) while job 2 runs.
+#   sbatch -A hhu49_alliance1 -p rtx6000 examples/slurm_jobs.sbatch configs/sweeps/shac_vs_ppo_sonic/qcbf_smoke_jobs.txt   # job 1
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo_sonic/qcbf_smoke_jobs.txt                                             # then job 2
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/ppo_s0/g1_recover/final_model.zip --tag ppo_s0 --sonic-dir $HOME/gear_sonic_hf --quick --out runs/shac_vs_ppo_sonic/qcbf_eval_smoke/ppo_s0  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_smoke/ppo_s0/push.json runs/shac_vs_ppo_sonic/qcbf_eval_smoke/ppo_s0/badref.json
+python examples/summarize_sonic_qcbf.py --root runs/shac_vs_ppo_sonic/qcbf_eval_smoke --out runs/shac_vs_ppo_sonic/qcbf_eval_smoke/summary  # always

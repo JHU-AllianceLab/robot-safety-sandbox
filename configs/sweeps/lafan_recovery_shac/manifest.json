@@ -1,0 +1,62 @@
+{
+ "sweep": "configs/sweeps/lafan_recovery_shac.yaml",
+ "smoke": false,
+ "only": null,
+ "runs_root": "runs/lafan_recovery",
+ "seeds": [
+  0,
+  1,
+  2
+ ],
+ "arms": [
+  {
+   "exp": "E8",
+   "arm": "SHAC-C",
+   "note": "C with the handover taken after the push ends, no push in the episode",
+   "gate": null,
+   "canonical": "E8/SHAC-C",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_shac/E8_SHAC-C.yaml",
+   "runs": {
+    "0": "runs/lafan_recovery/E8/SHAC-C_s0",
+    "1": "runs/lafan_recovery/E8/SHAC-C_s1",
+    "2": "runs/lafan_recovery/E8/SHAC-C_s2"
+   },
+   "final_models": {
+    "0": "runs/lafan_recovery/E8/SHAC-C_s0/g1_recover_safetyshac1p/final_model.zip",
+    "1": "runs/lafan_recovery/E8/SHAC-C_s1/g1_recover_safetyshac1p/final_model.zip",
+    "2": "runs/lafan_recovery/E8/SHAC-C_s2/g1_recover_safetyshac1p/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/lafan_recovery/E8/SHAC-C_s0/eval_frozen",
+    "1": "runs/lafan_recovery/E8/SHAC-C_s1/eval_frozen",
+    "2": "runs/lafan_recovery/E8/SHAC-C_s2/eval_frozen"
+   }
+  },
+  {
+   "exp": "E8",
+   "arm": "SHAC-C-push",
+   "note": "SHAC-C with the walker starts pushed before the episode (warm start under the push)",
+   "gate": null,
+   "canonical": "E8/SHAC-C-push",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_shac/E8_SHAC-C-push.yaml",
+   "runs": {
+    "0": "runs/lafan_recovery/E8/SHAC-C-push_s0",
+    "1": "runs/lafan_recovery/E8/SHAC-C-push_s1",
+    "2": "runs/lafan_recovery/E8/SHAC-C-push_s2"
+   },
+   "final_models": {
+    "0": "runs/lafan_recovery/E8/SHAC-C-push_s0/g1_recover_safetyshac1p/final_model.zip",
+    "1": "runs/lafan_recovery/E8/SHAC-C-push_s1/g1_recover_safetyshac1p/final_model.zip",
+    "2": "runs/lafan_recovery/E8/SHAC-C-push_s2/g1_recover_safetyshac1p/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/lafan_recovery/E8/SHAC-C-push_s0/eval_frozen",
+    "1": "runs/lafan_recovery/E8/SHAC-C-push_s1/eval_frozen",
+    "2": "runs/lafan_recovery/E8/SHAC-C-push_s2/eval_frozen"
+   }
+  }
+ ],
+ "warnings": []
+}

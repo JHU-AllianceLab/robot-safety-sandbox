@@ -1,0 +1,10 @@
+# Is the real noisy trajectory inside the convex hull of R noisy rollouts, and how big is
+# the hull over time (examples/rollout_hull_coverage.py): 128 kicked held-out starts, SHAC
+# with sensor noise in the real env, 32 noisy rollouts each from the exact CPU simulator and
+# from SHAC's world model; coverage (R = 8 / 16 / 32) and hull size in 1-D (g, pelvis
+# height, tilt), 2-D (body velocity xy, lean xy) and 3-D (lean xy + height), against the
+# exchangeable benchmark. One GPU + 4 CPUs (agentic_qos), ~20 min per seed.
+# Outputs: runs/shac_vs_ppo_sonic/rollout_hull/<tag>.json.
+python examples/rollout_hull_coverage.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --tag shac_s0  # creates: runs/shac_vs_ppo_sonic/rollout_hull/shac_s0.json
+python examples/rollout_hull_coverage.py --policy runs/shac_vs_ppo_sonic/shac_s1/g1_recover_safetyshac1p/final_model.zip --tag shac_s1  # creates: runs/shac_vs_ppo_sonic/rollout_hull/shac_s1.json
+python examples/rollout_hull_coverage.py --policy runs/shac_vs_ppo_sonic/shac_s2/g1_recover_safetyshac1p/final_model.zip --tag shac_s2  # creates: runs/shac_vs_ppo_sonic/rollout_hull/shac_s2.json

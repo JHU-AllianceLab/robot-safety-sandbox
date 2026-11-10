@@ -204,3 +204,128 @@ def test_composed_pairs_match_the_separate_margins():
   g2, l2 = locomote_margins(lenv)
   assert torch.allclose(g2, g_fall(lenv).clamp(-CLAMP, CLAMP))
   assert torch.allclose(l2, l_track(lenv).clamp(-CLAMP, CLAMP))
+
+
+# --- the no-pelvis-height ablation (tasks g1_recover*_noheight) ----------------
+
+def test_noheight_margin_ignores_the_pelvis_height():
+  """g_fall_noheight is g_fall without its height term: a low but upright,
+  contact-free pelvis stays safe; tilt and non-foot contact still fail; where
+  the height term does not bind the two margins agree."""
+  from robot_safety_sandbox.envs.g1_stabilize.env_cfg import g_fall, g_fall_noheight
+  low = _Env(pelvis_z=0.30)
+  assert float(g_fall(low)) < 0.0 < float(g_fall_noheight(low))
+  assert float(g_fall_noheight(_Env(tilt_cos=_cos(60.0)))) < 0.0
+  assert float(g_fall_noheight(_Env(contact_n=50.0))) < 0.0
+  for env in (_Env(tilt_cos=_cos(30.0)), _Env(contact_n=5.0), _Env(pelvis_z=0.9)):
+    assert torch.allclose(g_fall(env), g_fall_noheight(env))
+  assert float(g_fall_noheight(_Env(pelvis_z=-5.0))) == float(g_fall_noheight(_Env()))
+  # the hook cpu_rollout.build_spec reads to drop the CPU margin's height term
+  assert g_fall.fall_height_term is True and g_fall_noheight.fall_height_term is False
+
+
+def test_noheight_tasks_register_the_ablated_margin_and_critic():
+  """g1_recover_noheight / g1_recover_lafan_noheight: avoid-only on
+  g_fall_noheight, otherwise their parents' registration; their cfg has no
+  pelvis_height in the critic group (and refuses one), the parent's still has."""
+  import pytest
+  import robot_safety_sandbox  # noqa: F401  (registers on import)
+  from robot_safety_sandbox.envs.g1_stabilize.env_cfg import g_fall_noheight
+  from robot_safety_sandbox.registry import AVOID, spec
+  for tid, parent in (("g1_recover_noheight", "g1_recover"),
+                      ("g1_recover_lafan_noheight", "g1_recover_lafan")):
+    s, p = spec(tid), spec(parent)
+    assert s.mode == AVOID and s.margin_fn.avoid_margin is g_fall_noheight, tid
+    assert s.margin_fn.reach_margin is None, tid
+    assert (s.ctrl_dim, s.dstb_dim, s.kwargs) == (p.ctrl_dim, p.dstb_dim, p.kwargs), tid
+  ablated = spec("g1_recover_noheight").cfg_builder()
+  full = spec("g1_recover").cfg_builder()
+  a_terms = list(ablated.observations["critic"].terms)
+  f_terms = list(full.observations["critic"].terms)
+  assert "pelvis_height" in f_terms and "pelvis_height" not in a_terms
+  assert [t for t in f_terms if t != "pelvis_height"] == a_terms
+  assert list(ablated.observations["actor"].terms) == list(full.observations["actor"].terms)
+  assert set(ablated.terminations) == set(full.terminations)
+  with pytest.raises(ValueError):
+    spec("g1_recover_noheight").cfg_builder(critic_pelvis_height=True)
+
+
+def test_nofoot_tasks_keep_only_the_actor_terms_and_base_lin_vel():
+  """g1_recover_noheight_nofoot / g1_recover_lafan_noheight_nofoot: the
+  *_noheight registration (margin, mode, kwargs), a critic group of the actor
+  terms + base_lin_vel (the student world model's state), and the actor obs and
+  terminations of the parent; the builder refuses the privileged terms back."""
+  import pytest
+  import robot_safety_sandbox  # noqa: F401  (registers on import)
+  from robot_safety_sandbox.envs.g1_recover.env_cfg import CRITIC_FOOT_TERMS
+  from robot_safety_sandbox.registry import spec
+  for tid, parent in (("g1_recover_noheight_nofoot", "g1_recover_noheight"),
+                      ("g1_recover_lafan_noheight_nofoot", "g1_recover_lafan_noheight")):
+    s, p = spec(tid), spec(parent)
+    assert s.mode == p.mode and s.margin_fn.avoid_margin is p.margin_fn.avoid_margin, tid
+    assert (s.ctrl_dim, s.dstb_dim, s.kwargs) == (p.ctrl_dim, p.dstb_dim, p.kwargs), tid
+  student = spec("g1_recover_noheight_nofoot").cfg_builder()
+  teacher = spec("g1_recover_noheight").cfg_builder()
+  actor = list(student.observations["actor"].terms)
+  assert actor == list(teacher.observations["actor"].terms)
+  assert list(student.observations["critic"].terms) == actor + ["base_lin_vel"]
+  assert [t for t in teacher.observations["critic"].terms if t not in CRITIC_FOOT_TERMS] \
+      == actor + ["base_lin_vel"]
+  assert set(student.terminations) == set(teacher.terminations)
+  for k in ("critic_pelvis_height", "critic_foot_terms"):
+    with pytest.raises(ValueError):
+      spec("g1_recover_noheight_nofoot").cfg_builder(**{k: True})
+
+
+def test_nolinvel_tasks_keep_exactly_the_actor_terms():
+  """g1_recover_noheight_nofoot_nolinvel / its lafan twin: the *_noheight
+  registration, a critic group of exactly the actor terms (the 98-D student
+  world model's state, which world_model_spec maps one to one), the parent's
+  actor obs and terminations; the builder refuses every privileged term back."""
+  import pytest
+  import robot_safety_sandbox  # noqa: F401  (registers on import)
+  from robot_safety_sandbox.registry import spec
+  for tid, parent in (("g1_recover_noheight_nofoot_nolinvel", "g1_recover_noheight"),
+                      ("g1_recover_lafan_noheight_nofoot_nolinvel", "g1_recover_lafan_noheight")):
+    s, p = spec(tid), spec(parent)
+    assert s.mode == p.mode and s.margin_fn.avoid_margin is p.margin_fn.avoid_margin, tid
+    assert (s.ctrl_dim, s.dstb_dim, s.kwargs) == (p.ctrl_dim, p.dstb_dim, p.kwargs), tid
+  student = spec("g1_recover_noheight_nofoot_nolinvel").cfg_builder()
+  teacher = spec("g1_recover_noheight").cfg_builder()
+  actor = list(student.observations["actor"].terms)
+  assert actor == list(teacher.observations["actor"].terms)
+  assert list(student.observations["critic"].terms) == actor
+  # noise-free: the critic group never corrupts (mjlab drops its terms' noise)
+  assert not student.observations["critic"].enable_corruption
+  assert set(student.terminations) == set(teacher.terminations)
+  for k in ("critic_pelvis_height", "critic_foot_terms", "critic_base_lin_vel"):
+    with pytest.raises(ValueError):
+      spec("g1_recover_noheight_nofoot_nolinvel").cfg_builder(**{k: True})
+
+
+def test_cpu_rollout_margin_drops_the_height_term_at_z_min_minus_inf():
+  """The CPU rollout's g_fall (cpu_rollout.Roller.margin) with the spec's
+  z_min = -inf, what build_spec writes for a g_fall_noheight task, equals
+  g_fall_noheight; with z_min = Z_MIN it equals g_fall (a low pelvis fails)."""
+  import numpy as np
+  from types import SimpleNamespace
+  sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "examples"))
+  import cpu_rollout as cr
+  from robot_safety_sandbox.envs.g1_stabilize.env_cfg import (
+    CONTACT_FORCE_THRESHOLD, TILT_COS, Z_MIN, Z_SCALE, g_fall, g_fall_noheight)
+
+  def cpu_g(z_min, pelvis_z, tilt_deg, force):
+    r = object.__new__(cr.Roller)
+    r.s = SimpleNamespace(root_qadr=0, z_min=z_min, z_scale=Z_SCALE, tilt_cos=TILT_COS,
+                          force_threshold=CONTACT_FORCE_THRESHOLD, clamp=CLAMP)
+    r.tilt_norm = 1.0 - TILT_COS
+    h = math.radians(tilt_deg) / 2.0                  # pitch about y, w-first quaternion
+    d = SimpleNamespace(qpos=np.array([0.0, 0.0, pelvis_z, math.cos(h), 0.0, math.sin(h), 0.0]))
+    return r.margin(d, force)
+
+  for z, tilt, f in ((0.30, 0.0, 0.0), (0.60, 20.0, 0.0), (0.76, 55.0, 0.0), (0.50, 0.0, 30.0)):
+    env = _Env(pelvis_z=z, tilt_cos=_cos(tilt), contact_n=f)
+    want_no = float(g_fall_noheight(env).clamp(-CLAMP, CLAMP))
+    want_full = float(g_fall(env).clamp(-CLAMP, CLAMP))
+    assert abs(cpu_g(-math.inf, z, tilt, f) - want_no) < 1e-5, (z, tilt, f)
+    assert abs(cpu_g(Z_MIN, z, tilt, f) - want_full) < 1e-5, (z, tilt, f)

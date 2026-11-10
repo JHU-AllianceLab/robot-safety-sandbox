@@ -1,0 +1,76 @@
+# The Q-CBF safety filter on SONIC (examples/eval_sonic_qcbf.py) with each of the
+# six configs/sweeps/shac_vs_ppo_sonic fallbacks as pi. Run it after the
+# policy's policy_eval_jobs.txt and policy_eval_td_jobs.txt tasks, because it
+# reads data/policy_eval_gfall/{v,q}_<tag>.pt (exact, 3 s rollout labels) and
+# {v,q}_td_g099_<tag>.pt (TD, gamma 0.99). Per policy, one GPU:
+#   1. push suite: 16384 episodes on the held-out LAFAN clips
+#      (data/g1_lafan1_clips_test.pt), a velocity kick |dv| ~ U(0, 5) m/s at
+#      0.5-1.5 s, survival counted for 4 s after it. 14 conditions: sonic,
+#      fallback, qcbf:{exact,td_g099}:{0.0,0.5,0.7,0.9}, qcbf:exact:0.7:{gd,segment}
+#      and lrsf:{exact,td_g099}.
+#   2. bad-reference suite: 26 ill-posed reference scenarios
+#      (envs/g1_recover/bad_reference.py) x 4096 episodes, the corruption at
+#      1-2 s, survival counted for 3 s after it. 5 conditions: sonic,
+#      qcbf:{exact,td_g099}:0.7 and lrsf:{exact,td_g099}.
+# Every run but 7-8 uses --hip mjlab: the hip pitch is the sandbox G1's 7520-14
+# (Kp 40.2, 88 N m), the robot pi was trained and its V / Q labelled on, so
+# SONIC (trained on the 7520-22: Kp 99.1, 139 N m) is the one off-model. In the
+# --quick diagnostics (qcbf_diag_jobs.txt) SafetyPPO alone survived 0.31 of the
+# pushes on the 7520-22 against 0.67 on the 7520-14, SHAC 0.83 / 0.85, and SONIC
+# 0.52 / 0.45.
+# The filter certifies only actions within ||u - u_SONIC|| <= sqrt(29) (the trust
+# region, --qcbf-max-dev) and hands every other step to pi; pi's last-action
+# input is clamped to the +-3 box it was trained with (--pi-obs-clamp box).
+# Every policy uses seed 0, so every policy and every condition runs the same
+# episodes. Outputs go to runs/shac_vs_ppo_sonic/qcbf_eval/<tag>/: push.{pt,json},
+# badref.{pt,json} and episodes_bank.pt. Job 15 tabulates SHAC vs PPO into
+# summary.md and summary.json there. Its pooled CIs and p-values cluster by
+# episode (the seeds share their episodes) and read the .pt files, so keep them.
+# It needs no GPU.
+#   7-8. hip ablation: the push suite again with --hip sonic (SONIC's own
+#      7520-22 hip pitch, on which pi and its V / Q run off-model) for one SHAC
+#      and one PPO seed, 5 conditions, into
+#      runs/shac_vs_ppo_sonic/qcbf_eval_hip_sonic/<tag>/. Set them against the
+#      same tags' push.json of jobs 1-2; job 16 tabulates them. ~10-15 min each
+#      (estimated as below).
+#   9-14. trust-region ablation: both suites again with --qcbf-max-dev inf (the
+#      descent may certify any action Q accepts, however far from SONIC's) for
+#      all six policies, under sonic and qcbf:{exact,td_g099}:0.7, into
+#      runs/shac_vs_ppo_sonic/qcbf_eval_nocap/<tag>/. Same seed, so the same
+#      episodes as jobs 1-6: set its qcbf rows against theirs (SR, deviation,
+#      best-effort rate); job 17 tabulates them. ~30-40 min each (estimated).
+#
+# Wall time per policy on one RTX PRO 6000 is an ESTIMATE, not a measurement
+# (run qcbf_smoke_jobs.txt first and read its env-steps/s). It assumes the
+# SONIC harvester's ~100k env-steps/s at 4096 envs (~41 ms per step) plus the
+# filter's cost per step, which is launch-bound and nearly independent of the
+# env count: about 50 ms for qcbf (up to 60 batched Q forward+backward passes
+# plus ~30 forwards), about 5 ms for lrsf, about 2 ms for pi alone.
+#   push: one condition is 4 waves of <= 276 steps. sonic / fallback take ~45 s,
+#     lrsf ~50 s, qcbf ~100-170 s, so the 14 conditions take ~20-30 min.
+#   badref: one scenario x condition is 1 wave of <= 251 steps, ~80-110 s for
+#     the 5 conditions, so the 26 scenarios take ~35-50 min.
+#   setup (env, SONIC, 40 reference clips, reference clearance): ~5 min.
+# Total ~1-1.5 h per policy, inside slurm_jobs.sbatch's default --time=06:00:00.
+#
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo_sonic/qcbf_eval_jobs.txt --only $SLURM_ARRAY_TASK_ID   # array 1-14
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo_sonic/qcbf_eval_jobs.txt --only 15                     # the summary
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo_sonic/qcbf_eval_jobs.txt --only 16                     # the hip ablation's (--hip sonic)
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo_sonic/qcbf_eval_jobs.txt --only 17                     # the trust-region ablation's
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --tag shac_s0 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --out runs/shac_vs_ppo_sonic/qcbf_eval/shac_s0  # creates: runs/shac_vs_ppo_sonic/qcbf_eval/shac_s0/push.json runs/shac_vs_ppo_sonic/qcbf_eval/shac_s0/badref.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/ppo_s0/g1_recover/final_model.zip --tag ppo_s0 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --out runs/shac_vs_ppo_sonic/qcbf_eval/ppo_s0  # creates: runs/shac_vs_ppo_sonic/qcbf_eval/ppo_s0/push.json runs/shac_vs_ppo_sonic/qcbf_eval/ppo_s0/badref.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s1/g1_recover_safetyshac1p/final_model.zip --tag shac_s1 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --out runs/shac_vs_ppo_sonic/qcbf_eval/shac_s1  # creates: runs/shac_vs_ppo_sonic/qcbf_eval/shac_s1/push.json runs/shac_vs_ppo_sonic/qcbf_eval/shac_s1/badref.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/ppo_s1/g1_recover/final_model.zip --tag ppo_s1 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --out runs/shac_vs_ppo_sonic/qcbf_eval/ppo_s1  # creates: runs/shac_vs_ppo_sonic/qcbf_eval/ppo_s1/push.json runs/shac_vs_ppo_sonic/qcbf_eval/ppo_s1/badref.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s2/g1_recover_safetyshac1p/final_model.zip --tag shac_s2 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --out runs/shac_vs_ppo_sonic/qcbf_eval/shac_s2  # creates: runs/shac_vs_ppo_sonic/qcbf_eval/shac_s2/push.json runs/shac_vs_ppo_sonic/qcbf_eval/shac_s2/badref.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/ppo_s2/g1_recover/final_model.zip --tag ppo_s2 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --out runs/shac_vs_ppo_sonic/qcbf_eval/ppo_s2  # creates: runs/shac_vs_ppo_sonic/qcbf_eval/ppo_s2/push.json runs/shac_vs_ppo_sonic/qcbf_eval/ppo_s2/badref.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --tag shac_s0 --sonic-dir $HOME/gear_sonic_hf --hip sonic --suites push --conditions sonic fallback qcbf:exact:0.7 qcbf:td_g099:0.7 lrsf:exact --out runs/shac_vs_ppo_sonic/qcbf_eval_hip_sonic/shac_s0  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_hip_sonic/shac_s0/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/ppo_s0/g1_recover/final_model.zip --tag ppo_s0 --sonic-dir $HOME/gear_sonic_hf --hip sonic --suites push --conditions sonic fallback qcbf:exact:0.7 qcbf:td_g099:0.7 lrsf:exact --out runs/shac_vs_ppo_sonic/qcbf_eval_hip_sonic/ppo_s0  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_hip_sonic/ppo_s0/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --tag shac_s0 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --qcbf-max-dev inf --conditions sonic qcbf:exact:0.7 qcbf:td_g099:0.7 --badref-conditions sonic qcbf:exact:0.7 qcbf:td_g099:0.7 --out runs/shac_vs_ppo_sonic/qcbf_eval_nocap/shac_s0  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_nocap/shac_s0/push.json runs/shac_vs_ppo_sonic/qcbf_eval_nocap/shac_s0/badref.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/ppo_s0/g1_recover/final_model.zip --tag ppo_s0 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --qcbf-max-dev inf --conditions sonic qcbf:exact:0.7 qcbf:td_g099:0.7 --badref-conditions sonic qcbf:exact:0.7 qcbf:td_g099:0.7 --out runs/shac_vs_ppo_sonic/qcbf_eval_nocap/ppo_s0  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_nocap/ppo_s0/push.json runs/shac_vs_ppo_sonic/qcbf_eval_nocap/ppo_s0/badref.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s1/g1_recover_safetyshac1p/final_model.zip --tag shac_s1 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --qcbf-max-dev inf --conditions sonic qcbf:exact:0.7 qcbf:td_g099:0.7 --badref-conditions sonic qcbf:exact:0.7 qcbf:td_g099:0.7 --out runs/shac_vs_ppo_sonic/qcbf_eval_nocap/shac_s1  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_nocap/shac_s1/push.json runs/shac_vs_ppo_sonic/qcbf_eval_nocap/shac_s1/badref.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/ppo_s1/g1_recover/final_model.zip --tag ppo_s1 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --qcbf-max-dev inf --conditions sonic qcbf:exact:0.7 qcbf:td_g099:0.7 --badref-conditions sonic qcbf:exact:0.7 qcbf:td_g099:0.7 --out runs/shac_vs_ppo_sonic/qcbf_eval_nocap/ppo_s1  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_nocap/ppo_s1/push.json runs/shac_vs_ppo_sonic/qcbf_eval_nocap/ppo_s1/badref.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s2/g1_recover_safetyshac1p/final_model.zip --tag shac_s2 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --qcbf-max-dev inf --conditions sonic qcbf:exact:0.7 qcbf:td_g099:0.7 --badref-conditions sonic qcbf:exact:0.7 qcbf:td_g099:0.7 --out runs/shac_vs_ppo_sonic/qcbf_eval_nocap/shac_s2  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_nocap/shac_s2/push.json runs/shac_vs_ppo_sonic/qcbf_eval_nocap/shac_s2/badref.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/ppo_s2/g1_recover/final_model.zip --tag ppo_s2 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --qcbf-max-dev inf --conditions sonic qcbf:exact:0.7 qcbf:td_g099:0.7 --badref-conditions sonic qcbf:exact:0.7 qcbf:td_g099:0.7 --out runs/shac_vs_ppo_sonic/qcbf_eval_nocap/ppo_s2  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_nocap/ppo_s2/push.json runs/shac_vs_ppo_sonic/qcbf_eval_nocap/ppo_s2/badref.json
+python examples/summarize_sonic_qcbf.py --root runs/shac_vs_ppo_sonic/qcbf_eval --out runs/shac_vs_ppo_sonic/qcbf_eval/summary  # always
+python examples/summarize_sonic_qcbf.py --root runs/shac_vs_ppo_sonic/qcbf_eval_hip_sonic --out runs/shac_vs_ppo_sonic/qcbf_eval_hip_sonic/summary  # always
+python examples/summarize_sonic_qcbf.py --root runs/shac_vs_ppo_sonic/qcbf_eval_nocap --out runs/shac_vs_ppo_sonic/qcbf_eval_nocap/summary  # always

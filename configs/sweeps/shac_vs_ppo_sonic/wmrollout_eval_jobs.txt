@@ -1,0 +1,12 @@
+# The rollout filter with the future imagined in SHAC's own world model
+# (eval_sonic_qcbf.py condition wmrollout:<seconds>): u_SONIC for one model step,
+# then SHAC on the predicted state (noise-free), for 10 / 20 / 50 / 150 steps
+# (0.2 / 0.4 / 1 / 3 s); SONIC's action goes through only if the predicted g
+# stayed >= 0 and P(terminated) <= 0.5. Kick at the start, sensor noise OFF in the
+# real episode too: the same setting and episodes as
+# rollout_eval_startpush_noobsnoise_jobs.txt (CPU rollouts there: 95-96 %).
+# Under agentic_qos (1 job, 4 CPUs): the three seeds run in one job, in turn.
+# Outputs: runs/shac_vs_ppo_sonic/wmrollout_eval_startpush_noobsnoise/<tag>/push.{json,pt}.
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --tag shac_s0 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 512 --num-envs 256 --onset-s 0.02 0.02 --no-obs-noise --conditions sonic fallback wmrollout:0.2 wmrollout:0.4 wmrollout:1 wmrollout:3 --out runs/shac_vs_ppo_sonic/wmrollout_eval_startpush_noobsnoise/shac_s0  # creates: runs/shac_vs_ppo_sonic/wmrollout_eval_startpush_noobsnoise/shac_s0/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s1/g1_recover_safetyshac1p/final_model.zip --tag shac_s1 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 512 --num-envs 256 --onset-s 0.02 0.02 --no-obs-noise --conditions sonic fallback wmrollout:0.2 wmrollout:0.4 wmrollout:1 wmrollout:3 --out runs/shac_vs_ppo_sonic/wmrollout_eval_startpush_noobsnoise/shac_s1  # creates: runs/shac_vs_ppo_sonic/wmrollout_eval_startpush_noobsnoise/shac_s1/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s2/g1_recover_safetyshac1p/final_model.zip --tag shac_s2 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 512 --num-envs 256 --onset-s 0.02 0.02 --no-obs-noise --conditions sonic fallback wmrollout:0.2 wmrollout:0.4 wmrollout:1 wmrollout:3 --out runs/shac_vs_ppo_sonic/wmrollout_eval_startpush_noobsnoise/shac_s2  # creates: runs/shac_vs_ppo_sonic/wmrollout_eval_startpush_noobsnoise/shac_s2/push.json

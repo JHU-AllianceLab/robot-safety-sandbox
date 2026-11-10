@@ -1,0 +1,80 @@
+# Wave 3 (E7) of docs/experiments/g1-lafan-recovery.md: the confirmation run of
+# the wave-2 pick, E6/C-push, at 3 seeds and 1.5B steps.
+#
+#   python examples/make_sweep.py --sweep configs/sweeps/lafan_recovery_e7.yaml
+#
+# Its own sweep file because make_sweep.py takes one seed list per file. `base`
+# is lafan_recovery.yaml's base with E6/C-push's overrides folded in and `steps`
+# raised from 500M; keep the two in step if that base changes. The eval reuses
+# the frozen grid and the baselines' wave-1 evals (same runs_root, so they are
+# skipped as done).
+#
+# EDIT THIS FILE, not the generated configs (they are overwritten).
+
+name: lafan_recovery_e7
+runs_root: runs/lafan_recovery
+config_dir: configs/sweeps/lafan_recovery_e7
+seeds: [0, 1, 2]
+
+# --- E6/C-push at 1.5B steps -------------------------------------------------------
+# 70 % P-pre-nominal handover states sampled uniformly (they carry their own
+# pending push and block the random one) + 30 % the walker-bank mixture, which
+# gets the one random push per episode.
+base:
+  family: on_policy
+  task: g1_recover_lafan
+  num_envs: 4096
+  steps: 1500000000
+  load: runs/g1_recover_push_fast_privcrit/g1_recover_push_fast/final_model.zip
+  critic_warmup_steps: 20000000
+  gamma: 0.99
+  gamma_anneal: false
+  privileged_critic: true
+  lr: 1.0e-4
+  adaptive_lr: false
+  target_kl: 0.01
+  ent_coef: 1.0e-3
+  max_std: 0.4
+  net: "512,256,128"
+  action_rate_coef: 0.05
+  action_mag_coef: 0.005
+  force_max: &force_max 300.0
+  force_start: *force_max
+  force_ramp_frac: 0.5
+  force_init: 0.5
+  force_floor: 0.2
+  video_interval: 100000000
+  video_seconds: 20
+  video_fps: 50
+  video_wandb: false
+  env_overrides:
+    dataset: [data/g1_recover_states.pt, data/g1_handover_train_labeled.pt]
+    weights: {nominal: 0.03, clean: 0.06, pushed: 0.075, fell: 0.09,
+              synthetic: 0.045, mocap: 0.0, handover: 0.70}
+    levels: 5
+    band_width: 0.4
+    init_level: 2
+    episode_length_s: 3.0
+    rest_terminate: true
+    rest_dwell_s: 0.4
+    rest_arm_s: 0.8
+    rest_gate_on_push: true
+    sampler: uniform
+    uniform_mix: 0.15
+    weight_column: p_surv
+
+# --- evaluation ----------------------------------------------------------------------
+eval:
+  grid_file: configs/sweeps/lafan_recovery/eval_grid.yaml
+  settings: [std, lafan, handover, walker, pre]
+  baselines:
+    push_fast_privcrit: runs/g1_recover_push_fast_privcrit/g1_recover_push_fast/final_model.zip
+    push_rear: runs/g1_recover_push_rear/g1_recover_push_rear/final_model.zip
+
+experiments:
+  E7:
+    title: confirmation of the wave-2 pick (3 runs)
+    arms:
+      C-push:
+        note: E6/C-push at 1.5B steps and 3 seeds
+        config: {}

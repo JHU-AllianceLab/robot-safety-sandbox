@@ -1,0 +1,16 @@
+# Policy evaluation of the configs/sweeps/shac_vs_ppo_sonic fallbacks under
+# g_fall, step 2 (after policy_eval_states.txt): per final policy, the exact
+# gamma = 1, T = 3 s labels V^pi / Q^pi on the train / calib / test states by
+# rollout (task g1_recover_lafan), then the fitted V and Q networks and their
+# conformal thresholds. Outputs in data/policy_eval_gfall/:
+# {train,calib,test}_{v,q}_labels_<tag>.pt, then v_<tag>.pt and q_<tag>.pt.
+#
+# One policy per line, one GPU each, independent (~0.6B env-steps of labels each,
+# ~2.4 h on an RTX 5080):
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo_sonic/policy_eval_jobs.txt --only $SLURM_ARRAY_TASK_ID   # array 1-6
+TASK=g1_recover_lafan OUT=data/policy_eval_gfall examples/policy_eval.sh label runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip shac_s0 && OUT=data/policy_eval_gfall examples/policy_eval.sh fit shac_s0  # creates: data/policy_eval_gfall/v_shac_s0.pt data/policy_eval_gfall/q_shac_s0.pt
+TASK=g1_recover_lafan OUT=data/policy_eval_gfall examples/policy_eval.sh label runs/shac_vs_ppo_sonic/ppo_s0/g1_recover/final_model.zip ppo_s0 && OUT=data/policy_eval_gfall examples/policy_eval.sh fit ppo_s0  # creates: data/policy_eval_gfall/v_ppo_s0.pt data/policy_eval_gfall/q_ppo_s0.pt
+TASK=g1_recover_lafan OUT=data/policy_eval_gfall examples/policy_eval.sh label runs/shac_vs_ppo_sonic/shac_s1/g1_recover_safetyshac1p/final_model.zip shac_s1 && OUT=data/policy_eval_gfall examples/policy_eval.sh fit shac_s1  # creates: data/policy_eval_gfall/v_shac_s1.pt data/policy_eval_gfall/q_shac_s1.pt
+TASK=g1_recover_lafan OUT=data/policy_eval_gfall examples/policy_eval.sh label runs/shac_vs_ppo_sonic/ppo_s1/g1_recover/final_model.zip ppo_s1 && OUT=data/policy_eval_gfall examples/policy_eval.sh fit ppo_s1  # creates: data/policy_eval_gfall/v_ppo_s1.pt data/policy_eval_gfall/q_ppo_s1.pt
+TASK=g1_recover_lafan OUT=data/policy_eval_gfall examples/policy_eval.sh label runs/shac_vs_ppo_sonic/shac_s2/g1_recover_safetyshac1p/final_model.zip shac_s2 && OUT=data/policy_eval_gfall examples/policy_eval.sh fit shac_s2  # creates: data/policy_eval_gfall/v_shac_s2.pt data/policy_eval_gfall/q_shac_s2.pt
+TASK=g1_recover_lafan OUT=data/policy_eval_gfall examples/policy_eval.sh label runs/shac_vs_ppo_sonic/ppo_s2/g1_recover/final_model.zip ppo_s2 && OUT=data/policy_eval_gfall examples/policy_eval.sh fit ppo_s2  # creates: data/policy_eval_gfall/v_ppo_s2.pt data/policy_eval_gfall/q_ppo_s2.pt

@@ -1,0 +1,14 @@
+# The CPU rollout filter with sensor noise ON in the real episode and NOISY checks:
+# rollout:<seconds>:<R> runs R exact CPU MuJoCo rollouts per robot (cpu_rollout.py:
+# exact state and DR draw), SHAC reading each through the env's sensor-noise law (a
+# fresh draw per rollout and step), and hands over to SHAC if any of them reaches
+# g < 0. R = 8 / 16 / 32 at 0.4 / 1 / 3 s. Kick at the start, 512 episodes: the
+# episodes of rollout_eval_startpush_jobs.txt (single noise-free check there: 56-57 %;
+# SHAC alone 94 %).
+# CPU-heavy: ~100 CPU-hours per seed (R = 32 at 3 s dominates), so 64 CPUs per task,
+# ~2-4 h each. Needs a QOS that allows 64 CPUs (jhu; agentic_qos allows 4).
+# Outputs: runs/shac_vs_ppo_sonic/rollout_noisy_eval/<tag>/push.{json,pt}.
+#   sbatch -A hhu49_alliance1 --qos jhu -p l40s,rtx6000,h100 --array=1-3 --cpus-per-task=64 --mem=128G --time=08:00:00 --job-name=rollout_noisy_eval examples/slurm_jobs.sbatch configs/sweeps/shac_vs_ppo_sonic/rollout_noisy_eval_jobs.txt
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --tag shac_s0 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 512 --num-envs 256 --onset-s 0.02 0.02 --conditions sonic fallback rollout:0.4:8 rollout:0.4:16 rollout:0.4:32 rollout:1:8 rollout:1:16 rollout:1:32 rollout:3:8 rollout:3:16 rollout:3:32 --rollout-workers 62 --out runs/shac_vs_ppo_sonic/rollout_noisy_eval/shac_s0  # creates: runs/shac_vs_ppo_sonic/rollout_noisy_eval/shac_s0/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s1/g1_recover_safetyshac1p/final_model.zip --tag shac_s1 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 512 --num-envs 256 --onset-s 0.02 0.02 --conditions sonic fallback rollout:0.4:8 rollout:0.4:16 rollout:0.4:32 rollout:1:8 rollout:1:16 rollout:1:32 rollout:3:8 rollout:3:16 rollout:3:32 --rollout-workers 62 --out runs/shac_vs_ppo_sonic/rollout_noisy_eval/shac_s1  # creates: runs/shac_vs_ppo_sonic/rollout_noisy_eval/shac_s1/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s2/g1_recover_safetyshac1p/final_model.zip --tag shac_s2 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 512 --num-envs 256 --onset-s 0.02 0.02 --conditions sonic fallback rollout:0.4:8 rollout:0.4:16 rollout:0.4:32 rollout:1:8 rollout:1:16 rollout:1:32 rollout:3:8 rollout:3:16 rollout:3:32 --rollout-workers 62 --out runs/shac_vs_ppo_sonic/rollout_noisy_eval/shac_s2  # creates: runs/shac_vs_ppo_sonic/rollout_noisy_eval/shac_s2/push.json

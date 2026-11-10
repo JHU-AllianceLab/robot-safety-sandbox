@@ -1,0 +1,19 @@
+# configs/sweeps/shac_vs_ppo_sonic on the three-clip SONIC bank: SafetySHAC1P vs
+# SafetyPPO1P, 1.5B env steps, 3 seeds each, task g1_recover, MLP 512-256-128.
+# The same two configs (configs/g1_recover_sonic_safety{shac,ppo}1p.yaml) with one
+# change, the start bank: data/g1_sonic_push_gfall_3clips_bank_net.pt (199,656
+# rows; SONIC on walk1_subject1 / run1_subject2 / dance1_subject1 only, built by
+# configs/sweeps/sonic_3clips_bank/jobs.txt), passed as --env-override dataset=...
+# (it replaces the config's env_overrides.dataset and keeps its other keys).
+#
+# One training run per line, one GPU each; independent of each other:
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo_sonic_3clips/jobs.txt --list
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo_sonic_3clips/jobs.txt --only $SLURM_ARRAY_TASK_ID   # array 1-6
+#
+# Cost per seed on rtx6000 at 4096 envs: SHAC ~13 h (E8), PPO ~6 h.
+python examples/train.py --config configs/g1_recover_sonic_safetyshac1p.yaml --env-override dataset=data/g1_sonic_push_gfall_3clips_bank_net.pt --seed 0 --wandb-project shac_vs_ppo_sonic_3clips --out runs/shac_vs_ppo_sonic_3clips/shac_s0
+python examples/train.py --config configs/g1_recover_sonic_safetyppo1p.yaml --env-override dataset=data/g1_sonic_push_gfall_3clips_bank_net.pt --seed 0 --wandb-project shac_vs_ppo_sonic_3clips --out runs/shac_vs_ppo_sonic_3clips/ppo_s0
+python examples/train.py --config configs/g1_recover_sonic_safetyshac1p.yaml --env-override dataset=data/g1_sonic_push_gfall_3clips_bank_net.pt --seed 1 --wandb-project shac_vs_ppo_sonic_3clips --out runs/shac_vs_ppo_sonic_3clips/shac_s1
+python examples/train.py --config configs/g1_recover_sonic_safetyppo1p.yaml --env-override dataset=data/g1_sonic_push_gfall_3clips_bank_net.pt --seed 1 --wandb-project shac_vs_ppo_sonic_3clips --out runs/shac_vs_ppo_sonic_3clips/ppo_s1
+python examples/train.py --config configs/g1_recover_sonic_safetyshac1p.yaml --env-override dataset=data/g1_sonic_push_gfall_3clips_bank_net.pt --seed 2 --wandb-project shac_vs_ppo_sonic_3clips --out runs/shac_vs_ppo_sonic_3clips/shac_s2
+python examples/train.py --config configs/g1_recover_sonic_safetyppo1p.yaml --env-override dataset=data/g1_sonic_push_gfall_3clips_bank_net.pt --seed 2 --wandb-project shac_vs_ppo_sonic_3clips --out runs/shac_vs_ppo_sonic_3clips/ppo_s2

@@ -1,0 +1,11 @@
+# The SONIC push benchmark rebuilt in mjlab -- the fallbacks (README.md). One GPU per line:
+#   sbatch -A hhu49_alliance1 -p rtx6000 --array=1-6 --time=72:00:00 --job-name=push_bench_train \
+#       examples/slurm_jobs.sbatch configs/sweeps/push_bench/train_jobs.txt
+# 2 ms x 10 physics with 100 solver iterations: expect well over the 13 h a SHAC seed took at
+# 5 ms x 4 (measure the env-steps/s of the first log lines).
+python examples/train.py --config configs/g1_recover_bench_safetyshac1p.yaml --seed 0 --wandb-project push_bench --out runs/push_bench/shac_s0
+python examples/train.py --config configs/g1_recover_bench_safetyppo1p.yaml --seed 0 --wandb-project push_bench --out runs/push_bench/ppo_s0
+python examples/train.py --config configs/g1_recover_bench_safetyshac1p.yaml --seed 1 --wandb-project push_bench --out runs/push_bench/shac_s1
+python examples/train.py --config configs/g1_recover_bench_safetyppo1p.yaml --seed 1 --wandb-project push_bench --out runs/push_bench/ppo_s1
+python examples/train.py --config configs/g1_recover_bench_safetyshac1p.yaml --seed 2 --wandb-project push_bench --out runs/push_bench/shac_s2
+python examples/train.py --config configs/g1_recover_bench_safetyppo1p.yaml --seed 2 --wandb-project push_bench --out runs/push_bench/ppo_s2

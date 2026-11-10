@@ -21,6 +21,15 @@ clips: a shift the guarantee does not cover, so it shows how far it carries)
 and breaks the test results down by time from the kick, kick size and
 category. Output: ``<dir>/<mode>_<tag>.pt`` (state dict, eps, report) and the
 report as ``.json``.
+
+``--with-pi`` (``--mode q``) also fits on the pi-centred rows
+(``label_policy_values.py --q-center pi``: ``<split>_q_pi_labels_<tag>.pt``,
+whose played ``q_action`` replaces the states file's): every train row of
+both, ONE of the two per calib state (a seeded coin flip, so calibration keeps
+one sample per state), both on test, reported per centre too. It writes
+``q_<variant>_<tag>.pt`` (``--variant``, default ``exact_pi``) and copies
+``v_<tag>.pt`` to ``v_<variant>_<tag>.pt``, so the pair loads as one variant
+(``policy_value_filter.PolicyValues``).
 """
 
 from __future__ import annotations
@@ -53,17 +62,67 @@ def _parse(argv=None):
   p.add_argument("--lr", type=float, default=1e-3)
   p.add_argument("--beta", type=float, default=1e-3)
   p.add_argument("--residual-alphas", type=float, nargs="+", default=[0.05, 0.01])
+  p.add_argument("--with-pi", action="store_true",
+                 help="--mode q: also fit on the pi-centred rows (module docstring)")
+  p.add_argument("--variant", default=None,
+                 help="output <mode>_<variant>_<tag>.pt (default: none; exact_pi with --with-pi)")
   p.add_argument("--seed", type=int, default=0)
   p.add_argument("--device", default="cuda:0")
-  return p.parse_args(argv)
+  a = p.parse_args(argv)
+  if a.with_pi and a.mode != "q":
+    p.error("--with-pi needs --mode q")
+  if a.variant is None and a.with_pi:
+    a.variant = "exact_pi"
+  return a
 
 
-def _load(d: str, split: str, mode: str, tag: str):
+def _load(d: str, split: str, mode: str, tag: str, center: str = "row"):
+  """``(rows, x, v)`` of one split. ``center="pi"``: the pi-centred labels
+  (``label_policy_values.py --q-center pi``) and their played actions."""
   rows = torch.load(os.path.join(d, f"{split}_{mode}.pt"), map_location="cpu", weights_only=False)
-  lab = torch.load(os.path.join(d, f"{split}_{mode}_labels_{tag}.pt"), map_location="cpu",
+  pi = "_pi" if center == "pi" else ""
+  lab = torch.load(os.path.join(d, f"{split}_{mode}{pi}_labels_{tag}.pt"), map_location="cpu",
                    weights_only=False)
+  if center == "pi":
+    if mode != "q" or "q_action" not in lab:
+      raise SystemExit(f"{split}_{mode}{pi}_labels_{tag}.pt has no played q_action")
+    rows = dict(rows, q_action=lab["q_action"].float())
   x = features(rows, rows["q_action"] if mode == "q" else None)
   return rows, x, lab["v"]
+
+
+def _cat_rows(a: dict, b: dict) -> dict:
+  """The columns the report reads (:func:`_breakdown`), stacked."""
+  return {k: torch.cat([a[k], b[k]]) for k in ("t_rel", "dv", "center")}
+
+
+def load_splits(d: str, mode: str, tag: str, with_pi: bool, seed: int = 0,
+                splits=("train", "calib", "test")):
+  """``splits`` of :func:`_load`, SONIC-centred plus, ``with_pi``, pi-centred
+  (module docstring): ``(rows, x, v)`` each, ``rows["center"]`` 0 / 1."""
+  out = {}
+  coin = torch.Generator().manual_seed(seed)
+  for split in splits:
+    r0, x0, v0 = _load(d, split, mode, tag)
+    r0 = dict(r0, center=torch.zeros(x0.shape[0], dtype=torch.long))
+    if not with_pi:
+      out[split] = (r0, x0, v0)
+      continue
+    r1, x1, v1 = _load(d, split, mode, tag, "pi")
+    r1 = dict(r1, center=torch.ones(x1.shape[0], dtype=torch.long))
+    if split == "calib":
+      # one sample per state: keep the SONIC- or the pi-centred row
+      pick = torch.rand(x0.shape[0], generator=coin) < 0.5
+      v0 = v0.clone()
+      v1 = v1.clone()
+      v0[pick] = float("nan")
+      v1[~pick] = float("nan")
+    if v0.shape[1] != v1.shape[1]:
+      k = min(v0.shape[1], v1.shape[1])
+      v0, v1 = v0[:, :k], v1[:, :k]
+    out[split] = (_cat_rows(r0, r1), torch.cat([x0, x1]), torch.cat([v0, v1]))
+    del r0, r1, x0, x1
+  return out
 
 
 def _breakdown(rows, score, label, eps) -> dict:
@@ -87,9 +146,11 @@ def main(argv=None):
   torch.manual_seed(a.seed)
   dev = a.device
   t0 = time.time()
-  tr_rows, x_tr, v_tr = _load(a.dir, "train", a.mode, a.tag)
-  ca_rows, x_ca, v_ca = _load(a.dir, "calib", a.mode, a.tag)
-  te_rows, x_te, v_te = _load(a.dir, "test", a.mode, a.tag)
+  sp = load_splits(a.dir, a.mode, a.tag, a.with_pi, a.seed)
+  _, x_tr, v_tr = sp["train"]
+  _, x_ca, v_ca = sp["calib"]
+  te_rows, x_te, v_te = sp["test"]
+  del sp
   # every train rollout is a sample; calib / test take each row's FIRST rollout
   k = v_tr.shape[1]
   ok = ~torch.isnan(v_tr)
@@ -129,6 +190,17 @@ def main(argv=None):
             "calib_safe_frac": float((y_ca >= 0).float().mean()),
             "test_safe_frac": float((y_te >= 0).float().mean()),
             "test_mse": float(((s_te - y_te) ** 2).mean()), "thresholds": {}}
+  if a.with_pi:
+    report["with_pi"] = True
+    report["test_by_center"] = {}
+    for c, name in ((0, "sonic"), (1, "pi")):
+      m = te_rows["center"] == c
+      report["test_by_center"][name] = {
+        "n": int(m.sum()), "mse": float(((s_te[m] - y_te[m]) ** 2).mean()),
+        "bias": float((s_te[m] - y_te[m]).mean()), "safe_frac": float((y_te[m] >= 0).float().mean())}
+      r = report["test_by_center"][name]
+      print(f"[fit] test, {name}-centred actions: {r['n']} rows, mse {r['mse']:.4f}, bias "
+            f"{r['bias']:+.4f}, safe {r['safe_frac']:.3f}")
   fs = false_safe_threshold(s_ca, y_ca < 0.0, beta=a.beta, alphas=ALPHA_LADDER)
   report["thresholds"]["false_safe"] = {"calibration": fs}
   for alpha in a.residual_alphas:
@@ -142,13 +214,22 @@ def main(argv=None):
                                               if name == "false_safe" else "")
           + f"  | test: accept {t['accept_rate']:.3f}, false-safe {t['false_safe_rate']:.4f} "
             f"({t['false_safe']}/{t['accepted']}), recall {t['recall']:.3f}, coverage {t['coverage']:.4f}")
-  out = os.path.join(a.dir, f"{a.mode}_{a.tag}.pt")
+  stem = f"{a.mode}_{a.tag}" if a.variant is None else f"{a.mode}_{a.variant}_{a.tag}"
+  out = os.path.join(a.dir, f"{stem}.pt")
   torch.save({"state_dict": net.state_dict(), "in_dim": xs.shape[1], "hidden": list(a.hidden),
               "eps": {n: th["calibration"]["eps"] for n, th in report["thresholds"].items()},
               "report": report}, out)
   with open(os.path.splitext(out)[0] + ".json", "w") as f:
     json.dump(report, f, indent=1)
   print(f"[fit] wrote {out} ({time.time() - t0:.0f}s)")
+  if a.with_pi:
+    # V is unchanged: the same fit under the new variant's name
+    src = os.path.join(a.dir, f"v_{a.tag}.pt")
+    ck = torch.load(src, map_location="cpu", weights_only=False)
+    ck["copied_from"] = os.path.abspath(src)
+    dst = os.path.join(a.dir, f"v_{a.variant}_{a.tag}.pt")
+    torch.save(ck, dst)
+    print(f"[fit] copied {src} -> {dst}")
 
 
 if __name__ == "__main__":

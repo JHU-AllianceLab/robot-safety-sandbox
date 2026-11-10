@@ -1,0 +1,48 @@
+{
+ "sweep": "configs/sweeps/lafan_recovery_shac.yaml",
+ "smoke": true,
+ "only": null,
+ "runs_root": "runs/smoke/lafan_recovery_shac",
+ "seeds": [
+  0
+ ],
+ "arms": [
+  {
+   "exp": "E8",
+   "arm": "SHAC-C",
+   "note": "C with the handover taken after the push ends, no push in the episode",
+   "gate": null,
+   "canonical": "E8/SHAC-C",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_shac_smoke/E8_SHAC-C.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery_shac/E8/SHAC-C_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery_shac/E8/SHAC-C_s0/g1_recover_safetyshac1p/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery_shac/E8/SHAC-C_s0/eval_frozen"
+   }
+  },
+  {
+   "exp": "E8",
+   "arm": "SHAC-C-push",
+   "note": "SHAC-C with the walker starts pushed before the episode (warm start under the push)",
+   "gate": null,
+   "canonical": "E8/SHAC-C-push",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_shac_smoke/E8_SHAC-C-push.yaml",
+   "runs": {
+    "0": "runs/smoke/lafan_recovery_shac/E8/SHAC-C-push_s0"
+   },
+   "final_models": {
+    "0": "runs/smoke/lafan_recovery_shac/E8/SHAC-C-push_s0/g1_recover_safetyshac1p/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/smoke/lafan_recovery_shac/E8/SHAC-C-push_s0/eval_frozen"
+   }
+  }
+ ],
+ "warnings": []
+}

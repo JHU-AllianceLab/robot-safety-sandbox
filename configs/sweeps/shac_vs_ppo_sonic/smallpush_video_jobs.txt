@@ -1,0 +1,9 @@
+# Videos of the small-kick failures (|dv| < 1 m/s) of wmlatch_eval: every episode of the 512
+# (--seed 0 lists, kick at the start, sensor noise OFF) where SONIC, the WM tube filter
+# (wmmin:0.4:0.95), the exact CPU filter (rollout:1) or SHAC alone fell on some seed:
+#   70 fight 0.27 m/s, 78 fallAndGetUp 0.41, 385 fallAndGetUp 0.32 (references that leave K by
+#   themselves), 152 run 0.17, 331 dance 0.93, 400 sprint 0.66, 495 sprint 0.86.
+# Rendered with shac_s0, in the evaluation's own batch (filter_video.py); panels SONIC | WM tube
+# filter | exact-sim filter | SHAC alone. One GPU + 32 CPUs, ~10 min:
+#   sbatch -A hhu49_alliance1 -p l40s,rtx6000,h100 --array=1 --cpus-per-task=32 --mem=96G --time=00:45:00 --job-name=smallpush_video examples/slurm_jobs.sbatch configs/sweeps/shac_vs_ppo_sonic/smallpush_video_jobs.txt
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --tag shac_s0 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 512 --num-envs 256 --onset-s 0.02 0.02 --no-obs-noise --rollout-workers 30 --conditions sonic fallback wmmin:0.4:0.95 rollout:1 --tube-calib runs/shac_vs_ppo_sonic/wmmin_calib/shac_s0/min_tube.json --video-episodes 70 78 152 331 385 400 495 --video-conditions sonic wmmin:0.4:0.95 rollout:1 fallback --out runs/shac_vs_ppo_sonic/smallpush_videos/shac_s0  # creates: runs/shac_vs_ppo_sonic/smallpush_videos/shac_s0/videos/reel.mp4

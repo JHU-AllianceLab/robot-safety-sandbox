@@ -1,0 +1,8 @@
+# Videos of SONIC, SafetyPPO (ppo_s0) and SHAC (shac_s0), each alone, under the
+# push suite's kick (examples/record_sonic_push_video.py): 4 held-out episodes per
+# |dv| bin 1.5-2.5, 2.5-3.5 and 3.5-5 m/s, the three controllers side by side on
+# the same spawn and kick, on the sandbox hip (--hip mjlab, the run's actuator).
+# One GPU, ~10 min. Outputs: runs/shac_vs_ppo_sonic/videos/push_bins_hip_mjlab/
+# (<bin>/ep*.mp4, reel_<bin>.mp4, reel.mp4, summary.txt).
+#   sbatch -A hhu49_alliance1 -p rtx6000,l40s,h100 --time=00:45:00 examples/slurm_jobs.sbatch configs/sweeps/shac_vs_ppo_sonic/qcbf_video_jobs.txt
+python examples/record_sonic_push_video.py --sonic-dir $HOME/gear_sonic_hf --hip mjlab --policy ppo_s0=runs/shac_vs_ppo_sonic/ppo_s0/g1_recover/final_model.zip --policy shac_s0=runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --out-dir runs/shac_vs_ppo_sonic/videos/push_bins_hip_mjlab  # creates: runs/shac_vs_ppo_sonic/videos/push_bins_hip_mjlab/reel.mp4

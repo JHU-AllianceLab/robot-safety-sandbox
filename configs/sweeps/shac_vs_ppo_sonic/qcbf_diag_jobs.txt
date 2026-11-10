@@ -1,0 +1,14 @@
+# Diagnostics after the --quick smoke (qcbf_smoke_jobs.txt), push suite only,
+# 512 episodes. In the smoke (ppo_s0, --hip sonic) pi alone survived 0.56 of
+# the |dv| < 1.5 m/s kicks against SONIC's 0.95. These separate the hip
+# actuator (pi and its values were made on --hip mjlab) from pi itself, for
+# a PPO and a SHAC seed. Outputs: runs/shac_vs_ppo_sonic/qcbf_eval_diag/<case>/<tag>/.
+#   1-2. --hip mjlab, the smoke's 4 push conditions (sonic, qcbf:exact:0.7, lrsf:td_g099, fallback)
+#   3.   --hip sonic, the same for shac_s0 (the smoke ran ppo_s0)
+#   4-5. no kick (--dv-range 0 0): sonic and fallback under each hip, ppo_s0
+#   sbatch -A hhu49_alliance1 -p rtx6000,l40s,h100 --array=1-5 --time=00:30:00 examples/slurm_jobs.sbatch configs/sweeps/shac_vs_ppo_sonic/qcbf_diag_jobs.txt
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/ppo_s0/g1_recover/final_model.zip --tag ppo_s0 --sonic-dir $HOME/gear_sonic_hf --quick --suites push --hip mjlab --out runs/shac_vs_ppo_sonic/qcbf_eval_diag/hip_mjlab/ppo_s0  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_diag/hip_mjlab/ppo_s0/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --tag shac_s0 --sonic-dir $HOME/gear_sonic_hf --quick --suites push --hip mjlab --out runs/shac_vs_ppo_sonic/qcbf_eval_diag/hip_mjlab/shac_s0  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_diag/hip_mjlab/shac_s0/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --tag shac_s0 --sonic-dir $HOME/gear_sonic_hf --quick --suites push --hip sonic --out runs/shac_vs_ppo_sonic/qcbf_eval_diag/hip_sonic/shac_s0  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_diag/hip_sonic/shac_s0/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/ppo_s0/g1_recover/final_model.zip --tag ppo_s0 --sonic-dir $HOME/gear_sonic_hf --quick --suites push --hip sonic --dv-range 0 0 --conditions sonic fallback --out runs/shac_vs_ppo_sonic/qcbf_eval_diag/nokick_hip_sonic/ppo_s0  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_diag/nokick_hip_sonic/ppo_s0/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/ppo_s0/g1_recover/final_model.zip --tag ppo_s0 --sonic-dir $HOME/gear_sonic_hf --quick --suites push --hip mjlab --dv-range 0 0 --conditions sonic fallback --out runs/shac_vs_ppo_sonic/qcbf_eval_diag/nokick_hip_mjlab/ppo_s0  # creates: runs/shac_vs_ppo_sonic/qcbf_eval_diag/nokick_hip_mjlab/ppo_s0/push.json

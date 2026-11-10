@@ -1,0 +1,24 @@
+# STUDENT world models of the no-height SHAC policies (runs/shac_noheight/shac_s*), for
+# the online filter: the teacher's actor (frozen) collects on its own training task and
+# bank, and a fresh world model is fitted with the teacher's recipe for 300M env steps
+# (configs/g1_recover_sonic_noheight_student_wm.yaml, whose header has the details).
+#   jobs 1-3  nofoot_s*: task g1_recover_noheight_nofoot, state = actor terms +
+#             base_lin_vel (101-D): no foot height / air time / contact flags / forces
+#   jobs 4-6  full_s*:   the CONTROL, task g1_recover_noheight, the teacher's 113-D state,
+#             same recipe -- student vs control isolates the dropped observations
+#   jobs 7-9  nolinvel_s*: task g1_recover_noheight_nofoot_nolinvel, state = exactly the
+#             actor terms (98-D, noise-free): nofoot minus base_lin_vel (its control is
+#             nofoot_s*); added 2026-11-08
+# Each array task (student_seed.sh) trains, checks the actor stayed the teacher's
+# (check_frozen.py), then calibrates its tube (calib_jobs.txt); the last one writes
+# runs/shac_student/tube_compare.{json,log} (examples/compare_wm_tubes.py).
+#   sbatch -A hhu49_alliance1 -p rtx6000,l40s,h100 --array=1-9 --gres=gpu:1 --cpus-per-task=16 --mem=64G --time=04:00:00 --job-name=shac_student --output=logs/slurm/%x_%A_%a.out configs/sweeps/shac_student/student_seed.sh
+python examples/train.py --config configs/g1_recover_sonic_noheight_student_wm.yaml --seed 0 --load runs/shac_noheight/shac_s0/g1_recover_noheight_safetyshac1p/final_model.zip --no-load-world-model --no-wandb --out runs/shac_student/nofoot_s0  # creates: runs/shac_student/nofoot_s0/g1_recover_noheight_nofoot_safetyshac1p/final_model.zip
+python examples/train.py --config configs/g1_recover_sonic_noheight_student_wm.yaml --seed 1 --load runs/shac_noheight/shac_s1/g1_recover_noheight_safetyshac1p/final_model.zip --no-load-world-model --no-wandb --out runs/shac_student/nofoot_s1  # creates: runs/shac_student/nofoot_s1/g1_recover_noheight_nofoot_safetyshac1p/final_model.zip
+python examples/train.py --config configs/g1_recover_sonic_noheight_student_wm.yaml --seed 2 --load runs/shac_noheight/shac_s2/g1_recover_noheight_safetyshac1p/final_model.zip --no-load-world-model --no-wandb --out runs/shac_student/nofoot_s2  # creates: runs/shac_student/nofoot_s2/g1_recover_noheight_nofoot_safetyshac1p/final_model.zip
+python examples/train.py --config configs/g1_recover_sonic_noheight_student_wm.yaml --task g1_recover_noheight --seed 0 --load runs/shac_noheight/shac_s0/g1_recover_noheight_safetyshac1p/final_model.zip --no-load-world-model --no-wandb --out runs/shac_student/full_s0  # creates: runs/shac_student/full_s0/g1_recover_noheight_safetyshac1p/final_model.zip
+python examples/train.py --config configs/g1_recover_sonic_noheight_student_wm.yaml --task g1_recover_noheight --seed 1 --load runs/shac_noheight/shac_s1/g1_recover_noheight_safetyshac1p/final_model.zip --no-load-world-model --no-wandb --out runs/shac_student/full_s1  # creates: runs/shac_student/full_s1/g1_recover_noheight_safetyshac1p/final_model.zip
+python examples/train.py --config configs/g1_recover_sonic_noheight_student_wm.yaml --task g1_recover_noheight --seed 2 --load runs/shac_noheight/shac_s2/g1_recover_noheight_safetyshac1p/final_model.zip --no-load-world-model --no-wandb --out runs/shac_student/full_s2  # creates: runs/shac_student/full_s2/g1_recover_noheight_safetyshac1p/final_model.zip
+python examples/train.py --config configs/g1_recover_sonic_noheight_student_wm.yaml --task g1_recover_noheight_nofoot_nolinvel --seed 0 --load runs/shac_noheight/shac_s0/g1_recover_noheight_safetyshac1p/final_model.zip --no-load-world-model --no-wandb --out runs/shac_student/nolinvel_s0  # creates: runs/shac_student/nolinvel_s0/g1_recover_noheight_nofoot_nolinvel_safetyshac1p/final_model.zip
+python examples/train.py --config configs/g1_recover_sonic_noheight_student_wm.yaml --task g1_recover_noheight_nofoot_nolinvel --seed 1 --load runs/shac_noheight/shac_s1/g1_recover_noheight_safetyshac1p/final_model.zip --no-load-world-model --no-wandb --out runs/shac_student/nolinvel_s1  # creates: runs/shac_student/nolinvel_s1/g1_recover_noheight_nofoot_nolinvel_safetyshac1p/final_model.zip
+python examples/train.py --config configs/g1_recover_sonic_noheight_student_wm.yaml --task g1_recover_noheight_nofoot_nolinvel --seed 2 --load runs/shac_noheight/shac_s2/g1_recover_noheight_safetyshac1p/final_model.zip --no-load-world-model --no-wandb --out runs/shac_student/nolinvel_s2  # creates: runs/shac_student/nolinvel_s2/g1_recover_noheight_nofoot_nolinvel_safetyshac1p/final_model.zip

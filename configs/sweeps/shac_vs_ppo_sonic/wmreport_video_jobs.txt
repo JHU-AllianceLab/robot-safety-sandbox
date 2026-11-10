@@ -1,0 +1,11 @@
+# Filter videos for the WM-filter report (2x2: SONIC alone | exact-sim filter 1 s / the two best WM
+# tube filters, wmmin:1:0.95+latch and wmmin:1:0.95+dwell2), rendered inside the seed-0 evaluation batch with the
+# evaluation's exact flags (wmreport_jobs.txt job 3), so each episode keeps its spawn, kick and domain
+# randomization. Candidates from wm_filter_report.py --pick-videos (seed-0 outcomes):
+#   sonic_fails_wm_survives: [119, 14, 18, 5, 1]
+#   sonic_fails_0-1: [557, 70, 479, 45, 702]
+#   sonic_fails_1-2: [734, 62, 275, 104, 266]
+#   sonic_fails_2-3: [37, 30, 54, 32, 73]
+# One GPU + 32 CPUs, ~10 min:
+#   sbatch -A hhu49_alliance1 -p l40s,rtx6000,h100 --array=1 --cpus-per-task=32 --mem=96G --time=00:45:00 --job-name=wmreport_video examples/slurm_jobs.sbatch configs/sweeps/shac_vs_ppo_sonic/wmreport_video_jobs.txt
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --tag shac_s0 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 1024 --num-envs 256 --onset-s 0.02 0.02 --dv-range 0 4 --dv-bins 0 1 2 3 4 --exclude-categories fallAndGetUp sprint --no-obs-noise --rollout-workers 30 --conditions sonic rollout:1 wmmin:1:0.95+latch wmmin:1:0.95+dwell2 --tube-calib runs/shac_vs_ppo_sonic/wmreport/calib/shac_s0/min_tube.json --video-episodes 1 5 14 18 30 32 37 45 54 62 70 73 104 119 266 275 479 557 702 734 --video-conditions sonic rollout:1 wmmin:1:0.95+latch wmmin:1:0.95+dwell2 --video-size 640 480 --video-cols 2 --out runs/shac_vs_ppo_sonic/wmreport/videos_run/shac_s0  # creates: runs/shac_vs_ppo_sonic/wmreport/videos_run/shac_s0/videos/reel.mp4

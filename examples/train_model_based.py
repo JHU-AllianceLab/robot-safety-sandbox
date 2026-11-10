@@ -79,10 +79,11 @@ def _ints(text: str) -> list[int]:
   return [int(x) for x in str(text).split(",") if x.strip()]
 
 
-def _warm_start(model, path: str, device: str) -> None:
+def _warm_start(model, path: str, device: str, world_model: bool = True) -> None:
   """Seed the policy (actor + critic), the obs normalizer and, from a SHAC
-  checkpoint, the world model. Shape-filtered; optimizer moments start fresh.
-  Refuses a warm start that loaded no actor tensor at all."""
+  checkpoint, the world model (``world_model=False``: never; it starts fresh).
+  Shape-filtered; optimizer moments start fresh. Refuses a warm start that
+  loaded no actor tensor at all."""
   from stable_baselines3.common.save_util import load_from_zip_file
 
   from robot_safety_sandbox.eval.policies import find_obs_stats
@@ -102,7 +103,9 @@ def _warm_start(model, path: str, device: str) -> None:
       "[warm-start] NO actor tensor changed on load -- the checkpoint's actor "
       "keys / shapes do not match this policy (check --net against the source).")
   wm_src = params.get("world_model")
-  if wm_src is not None:
+  if wm_src is not None and not world_model:
+    print("[warm-start] world model NOT restored (--no-load-world-model): it starts fresh")
+  elif wm_src is not None:
     wm_tgt = model.world_model.state_dict()
     if all(k in wm_tgt and wm_tgt[k].shape == v.shape for k, v in wm_src.items()) \
         and set(wm_src) == set(wm_tgt):
@@ -151,6 +154,10 @@ def main():
   p.add_argument("--load", default=None,
                  help="warm-start .zip: a SafetyPPO1P (actor + critic) or SHAC "
                       "(+ world model) checkpoint with matching net shapes")
+  p.add_argument("--load-world-model", action=argparse.BooleanOptionalAction, default=True,
+                 help="--load: also restore a SHAC checkpoint's world model when its "
+                      "shapes match (--no-load-world-model: fit a fresh one, e.g. a "
+                      "student world model of a frozen policy)")
   p.add_argument("--norm-freeze-steps", type=int, default=5_000_000,
                  help="freeze obs-norm updates at the start of WARM-STARTED runs")
   p.add_argument("--terminal-type", choices=["all", "g"], default="all",
@@ -309,7 +316,7 @@ def main():
                            save_freq_steps=args.checkpoint_every),
   ]
   if args.load:
-    _warm_start(model, args.load, args.device)
+    _warm_start(model, args.load, args.device, world_model=args.load_world_model)
     cbs.append(NormFreezeCallback(args.norm_freeze_steps))
   if not args.no_wandb:
     import wandb

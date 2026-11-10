@@ -1,0 +1,12 @@
+# The rollout filter on SONIC (eval_sonic_qcbf.py condition rollout:<seconds>,
+# rollouts in CPU MuJoCo, cpu_rollout.py): every control step SONIC's action is
+# played in a copy of the robot's exact state, then SHAC for the rest of 1, 2 or
+# 3 s; SONIC's action goes through only if g stayed >= 0, else SHAC's. Next to
+# SONIC alone, SHAC alone and Q-CBF (exact fit, kappa 0.7), push suite only, on
+# the 512 episodes of the --quick runs (same seed and sizes: the same episodes
+# as qcbf_eval_diag), sandbox hip (--hip mjlab). One GPU + 32 CPUs each.
+# Outputs: runs/shac_vs_ppo_sonic/rollout_eval/<tag>/push.{json,pt}.
+#   sbatch -A hhu49_alliance1 -p l40s,rtx6000,h100 --array=1-3 --cpus-per-task=32 --mem=96G --time=02:00:00 --job-name=rollout_eval examples/slurm_jobs.sbatch configs/sweeps/shac_vs_ppo_sonic/rollout_eval_jobs.txt
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --tag shac_s0 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 512 --num-envs 256 --conditions sonic fallback qcbf:exact:0.7 rollout:1 rollout:2 rollout:3 --rollout-workers 30 --out runs/shac_vs_ppo_sonic/rollout_eval/shac_s0  # creates: runs/shac_vs_ppo_sonic/rollout_eval/shac_s0/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s1/g1_recover_safetyshac1p/final_model.zip --tag shac_s1 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 512 --num-envs 256 --conditions sonic fallback qcbf:exact:0.7 rollout:1 rollout:2 rollout:3 --rollout-workers 30 --out runs/shac_vs_ppo_sonic/rollout_eval/shac_s1  # creates: runs/shac_vs_ppo_sonic/rollout_eval/shac_s1/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s2/g1_recover_safetyshac1p/final_model.zip --tag shac_s2 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 512 --num-envs 256 --conditions sonic fallback qcbf:exact:0.7 rollout:1 rollout:2 rollout:3 --rollout-workers 30 --out runs/shac_vs_ppo_sonic/rollout_eval/shac_s2  # creates: runs/shac_vs_ppo_sonic/rollout_eval/shac_s2/push.json

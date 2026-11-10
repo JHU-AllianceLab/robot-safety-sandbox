@@ -15,7 +15,8 @@ LIBRARY (the spawn's ``mocap`` source only, ``sampler="uniform"``):
 1. TRACK. The episode starts on a library frame r (pose, twist, joint state
    of the clip). SONIC tracks the clip from frame r, closed loop, its
    reference turned to the robot's spawn heading.
-2. PUSH. ``onset`` (U(--onset-s) s, late enough to fill SONIC's 10-tick
+2. PUSH (``--push kick``, the default). ``onset`` (U(--onset-s) s, late
+   enough to fill SONIC's 10-tick
    histories) into the episode the pelvis velocity is SET: the root link's
    world twist gets a horizontal dv with |dv| ~ U(--dv-range) m/s, at an angle
    ``rel`` ~ U(-pi, pi) in the robot's heading frame (0 = along the heading,
@@ -28,6 +29,17 @@ LIBRARY (the spawn's ``mocap`` source only, ``sampler="uniform"``):
    ``impulse`` = m |dv| with m the robot's total mass, for comparison with the
    force pushes of the other harvesters (a velocity kick moves every link
    alike and adds no rotation, so it is the gentler push per N*s).
+   ``--push force`` is the SONIC push benchmark's state-pool push
+   (``envs/g1_recover/push_bench.py``, :class:`~push_bench.PointPush`): a
+   world-horizontal force at a uniform azimuth on one of the 12
+   ``push_bench.PUSH_SITES`` (uniform), at a point drawn uniformly by area on
+   that body's collision surface, for U{--push-ticks} control ticks, with
+   magnitude ``m dv / (ticks dt)`` (``dv`` ~ U(--dv-range), the equivalent
+   free-COM velocity change) and the torque of its point, recomputed every
+   tick. It starts at the tick that begins at the onset step, so trajectory
+   index ``pre`` is the state the force starts from (under ``kick``, the state
+   just after the kick). Only the bridge's own random push is dropped: the
+   task must not push.
 3. RECORD. Every control step from ``--pre-s`` before the push to
    ``--window-s`` after it (the state at the onset index is the one just after
    the kick), or to the fall. The episode then ends (its
@@ -73,7 +85,11 @@ steps, rows past a fall NaN, ``-1`` for the frame):
                      along the heading = from behind, +pi/2 = toward the
                      robot's left = from its right; random_push's convention)
     ep/impulse       m |dv_h| (horizontal part), N*s
-    ep/fell          the env ended the episode on a fall within the window
+    ep/push_steps    control ticks the force acts (0 under kick)
+    ep/push_site     index into push_bench.PUSH_SITES (-1 under kick)
+    ep/push_point_b  (E, 3) the force's point, body frame (force push)
+    ep/push_force_w  (E, 3) the force, world, N (force push)
+    ep/fell         the env ended the episode on a fall within the window
     ep/time_to_fall  s from the push; NaN if it survived
     ep/length        valid steps of each trajectory
     ep/pre_jerr      mean |q - q_ref| over the pre-push steps, rad (how well
@@ -96,17 +112,19 @@ monitor) are rebuilt from a trajectory with ``sonic.rebuild_inputs``.
 
 THE START BANK (``--bank-delays-s``; also from an existing trajectory file
 with ``--from-traj``). Each trajectory gives one start-state row per delay d
-(s after the push) it is still standing at: the state at index pre + d / dt
+(s after the push ENDS: the kick's instant, or the force's last tick) it is
+still standing at: the state at index pre + push_steps + d / dt
 in the bank schema (``envs/g1_recover/states.py``, ``kind =
 KIND_HANDOVER``), for the g1_recover spawn and ``label_start_states.py``.
 ``action`` is the env action of the target SONIC applied INTO that state
 (index - 1), clamped to the bridge's +-action_bound like the mocap rows (the
-fallback's own action box; SONIC's arms and wrists leave it). The kick is
-instantaneous, so no push is pending. ``fell`` / ``time_to_fall`` are
+fallback's own action box; SONIC's arms and wrists leave it). Every row comes
+after its push ended, so no push is pending. ``fell`` / ``time_to_fall`` are
 SONIC's fate from that state if it KEEPS control, not the fallback's (label
-those with label_start_states.py); ``handover_delay_s`` = d,
-``push_impulse`` = m |dv|, ``push_severity`` = |dv| / the top of --dv-range,
-``push_duration_s`` = 0, ``push_rel`` / ``push_onset_s`` / ``src_row`` /
+those with label_start_states.py); ``handover_delay_s`` = push_steps dt + d
+(from the onset), ``push_impulse`` = m |dv|, ``push_severity`` = |dv| / the
+top of --dv-range, ``push_duration_s`` = push_steps dt, ``push_rel`` /
+``push_onset_s`` / ``src_row`` /
 ``clip`` / ``category`` / ``frame`` / ``t`` as in the handover harvester.
 ``traj_index`` (a ``states.OPTIONAL_FIELDS`` column, so labeled and merged
 copies keep it) is the row's episode in the trajectory file named by the
@@ -138,6 +156,7 @@ except ImportError:
 from mjlab.utils.lab_api.math import quat_apply  # noqa: E402
 
 from robot_safety_sandbox.base import MjlabTensorSafetyEnv  # noqa: E402
+from robot_safety_sandbox.envs.g1_recover import push_bench as pb  # noqa: E402
 from robot_safety_sandbox.envs.g1_recover.sonic import (  # noqa: E402
   DEFAULT_SONIC_DIR, SONIC_JOINTS, SonicPolicy, SonicReference, SonicTracker,
   sonic_action_scale, use_sonic_hip_pitch)
@@ -164,9 +183,17 @@ def _parse(argv=None):
   p.add_argument("--num-envs", type=int, default=4096)
   p.add_argument("--hip", choices=("sonic", "mjlab"), default="sonic",
                  help="hip-pitch actuator: SONIC's training one or the sandbox G1's")
+  p.add_argument("--push", choices=("kick", "force"), default="kick",
+                 help="kick: set the pelvis velocity (instant); force: the SONIC push "
+                      "benchmark's point force on one of 12 bodies (module docstring)")
+  p.add_argument("--push-ticks", type=int, nargs=2, default=[5, 15],
+                 help="--push force: control ticks the force acts, U{lo..hi}")
+  p.add_argument("--surface-points", type=int, default=4096,
+                 help="--push force: points drawn per body (area-weighted) to pick from")
   p.add_argument("--dv-range", type=float, nargs=2, default=[0.0, 5.0],
-                 help="horizontal |dv| of the push, m/s (uniform); SONIC survives "
-                      "~half at 2.8")
+                 help="horizontal |dv| of the push, m/s (uniform; under --push force the "
+                      "equivalent free-COM dv, m dv = impulse); SONIC survives ~half at "
+                      "2.8 under kick")
   p.add_argument("--dz-range", type=float, nargs=2, default=[0.0, 0.0],
                  help="vertical dv, m/s (uniform)")
   p.add_argument("--dw-range", type=float, default=0.0,
@@ -197,12 +224,21 @@ def _parse(argv=None):
     p.error("need 0 <= --pre-s <= onset lo <= onset hi")
   if any(d < 0.0 or d > args.window_s for d in args.bank_delays_s):
     p.error("--bank-delays-s must lie in [0, --window-s]")
+  if args.push == "force":
+    lo_t, hi_t = args.push_ticks
+    if not 1 <= lo_t <= hi_t:
+      p.error("--push-ticks needs 1 <= lo <= hi")
+    if args.dz_range != [0.0, 0.0] or args.dw_range != 0.0:
+      p.error("--dz-range / --dw-range are kick-only")
   return args
 
 
-def make_env(args, overrides: dict, push_kw: dict) -> MjlabTensorSafetyEnv:
+def make_env(args, overrides: dict, push_kw: dict, render_mode: str | None = None,
+             cfg_fn=None) -> MjlabTensorSafetyEnv:
   """The task's env with mjlab's interval velocity push removed and, under
-  ``--hip sonic``, SONIC's hip-pitch actuator."""
+  ``--hip sonic``, SONIC's hip-pitch actuator. ``render_mode="rgb_array"``
+  gives ``env.render()``; ``cfg_fn(cfg)``, when given, edits the env cfg last
+  (e.g. its camera, ``cfg.viewer``)."""
   s = spec(args.task)
 
   def builder(play: bool = False, **kw):
@@ -210,13 +246,15 @@ def make_env(args, overrides: dict, push_kw: dict) -> MjlabTensorSafetyEnv:
     cfg.events.pop("push_robot", None)
     if args.hip == "sonic":
       use_sonic_hip_pitch(cfg)
+    if cfg_fn is not None:
+      cfg_fn(cfg)
     return cfg
 
   kw = dict(s.kwargs, random_push=push_kw)
   return MjlabTensorSafetyEnv(
     args.num_envs, args.device, cfg_builder=builder, margin_fn=s.margin_fn,
     ctrl_dim=s.ctrl_dim, dstb_dim=s.dstb_dim, adversary=False,
-    end_criterion=s.end_criterion, cfg_overrides=overrides, **kw)
+    end_criterion=s.end_criterion, cfg_overrides=overrides, render_mode=render_mode, **kw)
 
 
 class NonFootClearance:
@@ -319,6 +357,19 @@ class Harvest:
     self.dw_w = torch.zeros(n, 3, device=dev)
     self.dv_h = torch.zeros(n, 3, device=dev)
     self.rel = torch.zeros(n, device=dev)
+    # --push force: the push of each env's episode (PointPush arms it at the onset)
+    self.force = args.push == "force"
+    self.p_steps = torch.zeros(n, **long)
+    self.p_site = torch.full((n,), -1, **long)
+    self.p_point = torch.zeros(n, 3, device=dev)
+    self.p_force_w = torch.zeros(n, 3, device=dev)
+    self.p_angle_w = torch.zeros(n, device=dev)
+    self.pp = None
+    if self.force:
+      if max(args.bank_delays_s or [0.0]) + args.push_ticks[1] * self.dt > args.window_s + 1e-9:
+        raise SystemExit("--window-s must cover the longest push plus the largest bank delay")
+      self.pp = pb.PointPush(self.robot, dev)
+      self.points = self._surface_pool(int(args.surface_points), int(args.seed))
     self.jerr = torch.zeros(n, device=dev)
     self.pushed = torch.zeros(n, dtype=torch.bool, device=dev)
     self.ref_clear = torch.zeros(n, device=dev)
@@ -336,6 +387,33 @@ class Harvest:
     self.ep_cat = torch.zeros(ncat, **long)
     self.prefix_cat = torch.zeros(ncat, **long)
     self.short = 0
+
+  def _surface_pool(self, k: int, seed: int) -> torch.Tensor:
+    """``k`` area-weighted surface points per push body, body frame,
+    ``[sites, k, 3]`` on the device (one seeded draw per body)."""
+    import numpy as np
+    m = self.mj.sim.mj_model
+    gids = self.robot.indexing.body_ids[torch.as_tensor(self.pp.body_ids)].cpu().tolist()
+    pts = [pb.sample_surface_points(m, int(g), k, np.random.default_rng([int(seed), i, 123]))
+           for i, g in enumerate(gids)]
+    return torch.as_tensor(np.stack(pts), dtype=torch.float32, device=self.dev)
+
+  def start_push(self, mask: torch.Tensor) -> None:
+    """--push force: arm the drawn force of the envs in ``mask`` (their onset
+    tick is the next step) and log its angle to the heading."""
+    if not bool(mask.any()):
+      return
+    h = self.robot.data.heading_w.reshape(-1)
+    rel = torch.remainder(self.p_angle_w - h + math.pi, 2.0 * math.pi) - math.pi
+    self.rel = torch.where(mask, rel, self.rel)
+    mag = self.dv_h[:, :2].norm(dim=1)
+    dv_h = torch.stack([mag * torch.cos(rel), mag * torch.sin(rel), torch.zeros_like(mag)], 1)
+    self.dv_h = torch.where(mask.unsqueeze(1), dv_h, self.dv_h)
+    dv_w = torch.stack([mag * torch.cos(self.p_angle_w), mag * torch.sin(self.p_angle_w),
+                        torch.zeros_like(mag)], 1)
+    self.dv_w = torch.where(mask.unsqueeze(1), dv_w, self.dv_w)
+    self.pp.start(mask, self.p_site.clamp_min(0), self.p_point, self.p_force_w, self.p_steps)
+    self.pushed |= mask
 
   def _cat_bucket(self, rows: torch.Tensor) -> torch.Tensor:
     cat = self.lib["category"][rows]
@@ -400,6 +478,22 @@ class Harvest:
     self.dv_h = torch.where(take.unsqueeze(1), dv_h, self.dv_h)
     self.rel = torch.where(take, rel, self.rel)
     self.dw_w = torch.where(take.unsqueeze(1), dw, self.dw_w)
+    if self.force:
+      # his pool's push: uniform body, area-weighted point, uniform world
+      # azimuth, U{ticks}; the force fixed in the world from the onset
+      lo_t, hi_t = a.push_ticks
+      steps_ = torch.randint(lo_t, hi_t + 1, (self.n,), device=dev)
+      site = torch.randint(0, len(pb.PUSH_SITES), (self.n,), device=dev)
+      pick = torch.randint(0, int(self.points.shape[1]), (self.n,), device=dev)
+      ang = (torch.rand(self.n, device=dev) * 2.0 - 1.0) * math.pi
+      f_w = pb.push_force(self.mass, mag, steps_, dt, ang)
+      t1 = take.unsqueeze(1)
+      self.p_steps = torch.where(take, steps_, self.p_steps)
+      self.p_site = torch.where(take, site, self.p_site)
+      self.p_point = torch.where(t1, self.points[site, pick], self.p_point)
+      self.p_force_w = torch.where(t1, f_w, self.p_force_w)
+      self.p_angle_w = torch.where(take, ang, self.p_angle_w)
+      self.pp.stop(take)
     self.tr.start(take, self.lib["clip"][rows.clamp_min(0)],
                   self.lib["frame"][rows.clamp_min(0)])
     cat = self._cat_bucket(rows[take])
@@ -495,6 +589,8 @@ class Harvest:
       "env_id": ids.clone(),
       "ref_clearance": self.ref_clear[ids], "ref_floor": self.ref_clear[ids] < 0.0,
       "ref_out_k": self.ref_bad[ids],
+      "push_steps": self.p_steps[ids], "push_site": self.p_site[ids],
+      "push_point_b": self.p_point[ids], "push_force_w": self.p_force_w[ids],
     }
     if not bool(self.pushed[ids].all()):
       raise RuntimeError("an episode was emitted without its push")
@@ -519,12 +615,20 @@ class Harvest:
       track = self.mode == TRACK
       act = tr.act()
       self.record_action(track)
+      if self.force:
+        # the force starts with the tick that begins at the onset step
+        self.start_push(track & (self.k == self.on))
+        self.pp.apply()
       _obs, g, dones, timeouts, _l = env.step_tensor(act)
       self.k += 1
       fell = dones & ~timeouts
-      # the push lands after the step, before SONIC's next observation
-      due = track & ~dones & (self.k == self.on)
-      self.push(due)
+      if self.force:
+        self.pp.tick()
+        self.pp.stop(dones)
+      else:
+        # the kick lands after the step, before SONIC's next observation
+        due = track & ~dones & (self.k == self.on)
+        self.push(due)
       tr.advance()
       live = track & ~dones
       self.record(live, g)
@@ -636,19 +740,23 @@ def trajectories_to_bank(res: dict, delays_s, traj_path: str) -> dict:
   offset = torch.as_tensor(meta["env_action_offset"])
   bound = float(meta["action_bound"])
   dv_hi = float(meta["dv_range"][1]) or 1.0
+  # the push's own length (0 for a kick; older files have no column)
+  end = res.get("ep/push_steps", torch.zeros_like(length)).long()
   cols: dict[str, list] = {}
   for d in delays_s:
-    j = pre + int(round(float(d) / dt))
+    jj = pre + end + int(round(float(d) / dt))          # per episode
     # standing at j, and j >= 1 so the target INTO it exists
-    ok = (length > j) & (j >= 1)
+    ok = (length > jj) & (jj >= 1)
     e = ok.nonzero(as_tuple=False).squeeze(-1)
     if e.numel() == 0:
       continue
+    j = jj[e]
     q = res["traj/root_quat"][e, j]
     quat_h, lin_h, ang_h = to_heading_frame(q, res["traj/lin_vel"][e, j],
                                             res["traj/ang_vel"][e, j])
     act = ((res["traj/target"][e, j - 1] - offset) / scale).clamp(-bound, bound)
-    ttf = res["ep/time_to_fall"][e] - float(d)
+    since = (j - pre).float() * dt                      # s from the onset
+    ttf = res["ep/time_to_fall"][e] - since
     clip, frame = res["ep/clip"][e], res["traj/ref_frame"][e, j]
     m = int(e.numel())
     rows = {
@@ -665,8 +773,8 @@ def trajectories_to_bank(res: dict, delays_s, traj_path: str) -> dict:
       "t": frame.float() / 50.0,
       "push_force_h": torch.zeros(m, 3), "push_left_steps": torch.zeros(m, dtype=torch.long),
       "push_impulse": res["ep/impulse"][e],
-      "handover_delay_s": torch.full((m,), float(d)),
-      "push_duration_s": torch.zeros(m), "push_onset_s": res["ep/onset_s"][e],
+      "handover_delay_s": since,
+      "push_duration_s": end[e].float() * dt, "push_onset_s": res["ep/onset_s"][e],
       "push_rel": res["ep/rel"][e], "src_row": res["ep/row"][e],
       "traj_index": e,
     }
@@ -678,13 +786,15 @@ def trajectories_to_bank(res: dict, delays_s, traj_path: str) -> dict:
   bank["meta"] = {
     "source": "harvest_g1_sonic_trajectories.py (start bank)",
     "trajectories": os.path.abspath(traj_path), "delays_s": [float(d) for d in delays_s],
+    "delays_from": "the push's end (the kick, or the force's last tick)",
+    "push": meta.get("push", "kick"), "task": meta.get("task"),
     "library": meta.get("library"), "clips": list(meta.get("clips", [])),
     "categories": list(meta.get("categories", [])), "split": meta.get("split"),
     "hip": meta.get("hip"), "dv_range": meta.get("dv_range"),
     "labels": "fell / time_to_fall are SONIC's (the nominal keeps control from the "
               "row), not the fallback's; label the fallback with label_start_states.py",
     "action": f"env action of SONIC's target into the row, clamped to +-{bound:g}",
-    "pending_push": "none (the velocity kick is instantaneous)",
+    "pending_push": "none (every row comes after its push ended)",
     "rows": n, "fell_rows": int(bank["fell"].sum()),
     "created": time.strftime("%Y-%m-%d %H:%M:%S"),
   }
@@ -697,7 +807,9 @@ def write_bank(res: dict, args, traj_path: str) -> None:
   out = args.bank_out or (os.path.splitext(traj_path)[0] + "_bank.pt")
   bank = trajectories_to_bank(res, args.bank_delays_s, traj_path)
   save_bank(bank, out)
-  per = {f"{d:g}": int((bank["handover_delay_s"] == float(d)).sum()) for d in args.bank_delays_s}
+  dt = float(res["meta"]["dt"])
+  since_end = bank["handover_delay_s"] - bank["push_duration_s"]
+  per = {f"{d:g}": int(((since_end - float(d)).abs() < 0.5 * dt).sum()) for d in args.bank_delays_s}
   print(f"[sonic] start bank: {bank['meta']['rows']} rows ({bank['meta']['fell_rows']} "
         f"SONIC falls) at delays {per} -> {out}")
 
@@ -721,16 +833,30 @@ def main(argv=None):
                    rest_terminate=False)
   push_kw = dict(interval_s=(1.0, 2.0), duration_s=0.2, first_delay_s=(0.1, 0.4),
                  horizontal=True, max_pushes=0)
+  if args.push == "force":
+    # the bridge's random push writes the torso's wrench every step, over
+    # PointPush's: no random-push process at all
+    push_kw = None
   env = make_env(args, overrides, push_kw)
   t0 = time.time()
   policy = SonicPolicy.from_onnx(args.sonic_dir).to(dev).eval()
-  ref = SonicReference.build(lib["meta"]["csv_dir"], lib["meta"]["clips"], dev, library=lib)
+  # A library built on another machine names that machine's CSV directory; the
+  # clip CSVs also live in this checkout's data/lafan1_g1.
+  csv_dir = lib["meta"]["csv_dir"]
+  if not os.path.isdir(csv_dir):
+    local = os.path.join(_ZOO, "data", "lafan1_g1")
+    print(f"[sonic] the library's csv_dir {csv_dir} does not exist here; "
+          f"reading the clip CSVs from {local}")
+    csv_dir = local
+  ref = SonicReference.build(csv_dir, lib["meta"]["clips"], dev, library=lib)
   tracker = SonicTracker(env, policy, ref)
   ok = lib["start_ok"] & (lib["kind"] == KIND_MOCAP)
-  print(f"[sonic] {args.library}: {int(ok.sum())} spawnable frames; hip pitch "
-        f"{args.hip}; push |dv| {args.dv_range} m/s, dz {args.dz_range}, dw +-{args.dw_range} "
-        f"rad/s, onset {args.onset_s} s; record {args.pre_s} s before to "
-        f"{args.window_s} s after ({time.time() - t0:.0f}s setup)")
+  push_txt = (f"force push ({len(pb.PUSH_SITES)} bodies, {args.push_ticks} ticks, "
+              f"dv {args.dv_range} m/s)" if args.push == "force" else
+              f"kick |dv| {args.dv_range} m/s, dz {args.dz_range}, dw +-{args.dw_range} rad/s")
+  print(f"[sonic] {args.library}: {int(ok.sum())} spawnable frames; task {args.task}; hip "
+        f"pitch {args.hip}; {push_txt}, onset {args.onset_s} s; record {args.pre_s} s before "
+        f"to {args.window_s} s after ({time.time() - t0:.0f}s setup)")
   t1 = time.time()
   clearance = reference_clearance(env, lib)
   print(f"[sonic] reference floor clearance of {clearance.numel()} library rows "
@@ -748,8 +874,11 @@ def main(argv=None):
     "source": "harvest_g1_sonic_trajectories.py", "library": os.path.abspath(args.library),
     "sonic_dir": os.path.abspath(args.sonic_dir), "sonic_variant": "default (sonic_release)",
     "clips": list(lm.get("clips", [])), "categories": list(lm.get("categories", [])),
-    "split": lm.get("split"), "csv_dir": lm.get("csv_dir"), "task": args.task,
-    "hip": args.hip, "dv_range": list(args.dv_range), "dz_range": list(args.dz_range),
+    "split": lm.get("split"), "csv_dir": os.path.abspath(csv_dir), "task": args.task,
+    "hip": args.hip, "push": args.push, "push_ticks": list(args.push_ticks),
+    "push_sites": list(pb.PUSH_SITES) if args.push == "force" else None,
+    "surface_points": args.surface_points if args.push == "force" else None,
+    "dv_range": list(args.dv_range), "dz_range": list(args.dz_range),
     "dw_range": args.dw_range, "onset_s": list(args.onset_s), "pre_s": args.pre_s,
     "window_s": args.window_s, "dt": h.dt, "onset_index": h.pre, "T": h.T,
     "joint_names": list(robot.joint_names), "target_joint_names": tnames,

@@ -95,16 +95,28 @@ def k_failure(env) -> torch.Tensor:
   return outside_k(terms(env))
 
 
-def g_k(env) -> torch.Tensor:
-  """The avoid margin anchored to K (module docstring); g < 0 iff outside K."""
-  t = terms(env)
+def margin_from_terms(t: dict[str, torch.Tensor],
+                      joint_scale: float = JOINT_SCALE) -> torch.Tensor:
+  """The avoid margin of raw K quantities ``t`` (:func:`terms`); g < 0 iff
+  outside K. ``joint_scale`` normalizes the joint term only (it never moves K):
+  0.1 is the 12-DoF pipeline's, 0.2 the 29-DoF SONIC pipeline's
+  (``tools/sonic_lafan/learning/recovery_env.safety_margin``)."""
   g = torch.minimum(torch.minimum((t["z"] - H_MIN) / H_SCALE,
                                   (THETA_MAX - t["tilt"]) / THETA_MAX),
-                    t["joint"] / JOINT_SCALE).clamp(-CLAMP, CLAMP)
+                    t["joint"] / float(joint_scale)).clamp(-CLAMP, CLAMP)
   g = torch.where(t["nonfoot"], torch.full_like(g, -1.0), g)
   out = outside_k(t)
   return torch.where(out, torch.minimum(g, torch.full_like(g, FAILURE_ANCHOR)),
                      g.clamp_min(0.0))
+
+
+def g_k(env, joint_scale: float = JOINT_SCALE) -> torch.Tensor:
+  """The avoid margin anchored to K (module docstring); g < 0 iff outside K."""
+  return margin_from_terms(terms(env), joint_scale)
+
+
+#: what a CPU rollout must reproduce (cpu_rollout.build_spec reads it)
+g_k.k_joint_scale = JOINT_SCALE
 
 
 def use_k_terminations(cfg) -> None:

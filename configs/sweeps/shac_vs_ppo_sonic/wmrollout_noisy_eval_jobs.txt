@@ -1,0 +1,12 @@
+# The world-model rollout filter with sensor noise ON in the real episode and NOISY
+# imagined checks: wmrollout:<seconds>:<R> runs R rollouts per robot in SHAC's world
+# model, SHAC reading each predicted state through the env's sensor-noise law (a fresh
+# draw per rollout and step), and hands over to SHAC if any of them fails (predicted
+# g < 0 or P(terminated) > 0.5). R = 8 / 16 / 32 at 0.4 / 1 / 3 s, next to the single
+# noise-free imagined rollout (wmrollout:<seconds>). Kick at the start, 512 episodes:
+# the episodes of rollout_eval_startpush_jobs.txt (CPU rollouts, noise-free check: 56-57 %).
+# Under agentic_qos (1 job, 4 CPUs): the three seeds run in one job, in turn.
+# Outputs: runs/shac_vs_ppo_sonic/wmrollout_noisy_eval/<tag>/push.{json,pt}.
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s0/g1_recover_safetyshac1p/final_model.zip --tag shac_s0 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 512 --num-envs 256 --onset-s 0.02 0.02 --conditions sonic fallback wmrollout:0.4 wmrollout:1 wmrollout:3 wmrollout:0.4:8 wmrollout:0.4:16 wmrollout:0.4:32 wmrollout:1:8 wmrollout:1:16 wmrollout:1:32 wmrollout:3:8 wmrollout:3:16 wmrollout:3:32 --out runs/shac_vs_ppo_sonic/wmrollout_noisy_eval/shac_s0  # creates: runs/shac_vs_ppo_sonic/wmrollout_noisy_eval/shac_s0/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s1/g1_recover_safetyshac1p/final_model.zip --tag shac_s1 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 512 --num-envs 256 --onset-s 0.02 0.02 --conditions sonic fallback wmrollout:0.4 wmrollout:1 wmrollout:3 wmrollout:0.4:8 wmrollout:0.4:16 wmrollout:0.4:32 wmrollout:1:8 wmrollout:1:16 wmrollout:1:32 wmrollout:3:8 wmrollout:3:16 wmrollout:3:32 --out runs/shac_vs_ppo_sonic/wmrollout_noisy_eval/shac_s1  # creates: runs/shac_vs_ppo_sonic/wmrollout_noisy_eval/shac_s1/push.json
+python examples/eval_sonic_qcbf.py --policy runs/shac_vs_ppo_sonic/shac_s2/g1_recover_safetyshac1p/final_model.zip --tag shac_s2 --sonic-dir $HOME/gear_sonic_hf --hip mjlab --suites push --episodes 512 --num-envs 256 --onset-s 0.02 0.02 --conditions sonic fallback wmrollout:0.4 wmrollout:1 wmrollout:3 wmrollout:0.4:8 wmrollout:0.4:16 wmrollout:0.4:32 wmrollout:1:8 wmrollout:1:16 wmrollout:1:32 wmrollout:3:8 wmrollout:3:16 wmrollout:3:32 --out runs/shac_vs_ppo_sonic/wmrollout_noisy_eval/shac_s2  # creates: runs/shac_vs_ppo_sonic/wmrollout_noisy_eval/shac_s2/push.json

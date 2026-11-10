@@ -1,0 +1,38 @@
+{
+ "sweep": "configs/sweeps/lafan_recovery_e7.yaml",
+ "smoke": false,
+ "only": null,
+ "runs_root": "runs/lafan_recovery",
+ "seeds": [
+  0,
+  1,
+  2
+ ],
+ "arms": [
+  {
+   "exp": "E7",
+   "arm": "C-push",
+   "note": "E6/C-push at 1.5B steps and 3 seeds",
+   "gate": null,
+   "canonical": "E7/C-push",
+   "same_as": null,
+   "config_path": "configs/sweeps/lafan_recovery_e7/E7_C-push.yaml",
+   "runs": {
+    "0": "runs/lafan_recovery/E7/C-push_s0",
+    "1": "runs/lafan_recovery/E7/C-push_s1",
+    "2": "runs/lafan_recovery/E7/C-push_s2"
+   },
+   "final_models": {
+    "0": "runs/lafan_recovery/E7/C-push_s0/g1_recover_lafan/final_model.zip",
+    "1": "runs/lafan_recovery/E7/C-push_s1/g1_recover_lafan/final_model.zip",
+    "2": "runs/lafan_recovery/E7/C-push_s2/g1_recover_lafan/final_model.zip"
+   },
+   "eval_dirs": {
+    "0": "runs/lafan_recovery/E7/C-push_s0/eval_frozen",
+    "1": "runs/lafan_recovery/E7/C-push_s1/eval_frozen",
+    "2": "runs/lafan_recovery/E7/C-push_s2/eval_frozen"
+   }
+  }
+ ],
+ "warnings": []
+}

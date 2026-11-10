@@ -1,0 +1,18 @@
+# Policy evaluation of the configs/sweeps/shac_vs_ppo_sonic fallbacks under
+# g1_recover's own margin g_fall (the task they trained on), not the ViaLasso K
+# that examples/policy_eval.sh defaults to: step 1, the query states.
+#
+# SONIC's gfall trajectories are harvested HERE with the recipe of the
+# experiment's banks (docs/experiments/shac-ppo-sonic.md section 5: train clips
+# seed 0, 50k episodes; test clips seed 1, 8k episodes), trajectories only (no
+# bank). Another GPU's floating point makes them differ from the workstation's
+# data/g1_sonic_push_gfall_{train,test}.pt behind the banks, hence the _arch
+# names: a bank's traj_index must not be joined with these files. Then
+# policy_eval.sh harvests the calibration trajectories (train clips, seed 2, 50k)
+# and builds the states data/policy_eval_gfall/{train,calib,test}_{v,q}.pt.
+# The cluster's SONIC release is in ~/gear_sonic_hf. One GPU, in order:
+#   examples/run_jobs.sh configs/sweeps/shac_vs_ppo_sonic/policy_eval_states.txt
+# Step 2, the labels and fits per policy: policy_eval_jobs.txt.
+python examples/harvest_g1_sonic_trajectories.py --task g1_recover_lafan --library data/g1_lafan1_clips_train.pt --sonic-dir $HOME/gear_sonic_hf --episodes 50000 --seed 0 --bank-delays-s --out data/g1_sonic_push_gfall_arch_train.pt
+python examples/harvest_g1_sonic_trajectories.py --task g1_recover_lafan --library data/g1_lafan1_clips_test.pt --sonic-dir $HOME/gear_sonic_hf --episodes 8000 --seed 1 --bank-delays-s --out data/g1_sonic_push_gfall_arch_test.pt
+SONIC_DIR=$HOME/gear_sonic_hf TASK=g1_recover_lafan TRAJ=data/g1_sonic_push_gfall_arch OUT=data/policy_eval_gfall examples/policy_eval.sh states  # creates: data/policy_eval_gfall/train_v.pt data/policy_eval_gfall/train_q.pt data/policy_eval_gfall/calib_v.pt data/policy_eval_gfall/calib_q.pt data/policy_eval_gfall/test_v.pt data/policy_eval_gfall/test_q.pt

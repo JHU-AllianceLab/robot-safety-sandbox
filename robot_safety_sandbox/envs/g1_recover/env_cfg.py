@@ -77,6 +77,11 @@ def rest_target_margins(lin_tol: float | None = None,
     gate_on_push=bool(gate_on_push)), clamp=CLAMP)
 
 
+#: the privileged foot terms of the critic group (all read the contact sensor or
+#: the world-frame foot sites); ``critic_foot_terms=False`` drops them
+CRITIC_FOOT_TERMS = ("foot_height", "foot_air_time", "foot_contact", "foot_contact_forces")
+
+
 def g1_recover_env_cfg(play: bool = False,
                        dataset: str | list[str] | None = None,
                        weights: dict | None = None, levels: int = 5,
@@ -91,21 +96,44 @@ def g1_recover_env_cfg(play: bool = False,
                        sequential_repeats: int = 1,
                        rest_lin_tol: float | None = None,
                        rest_ang_tol: float | None = None,
-                       rest_gate_on_push: bool = False) -> ManagerBasedRlEnvCfg:
+                       rest_gate_on_push: bool = False,
+                       critic_pelvis_height: bool = True,
+                       critic_foot_terms: bool = True,
+                       critic_base_lin_vel: bool = True) -> ManagerBasedRlEnvCfg:
   """All keyword arguments can be set from a run config's ``env_overrides``.
-  The rest-target kwargs act only with ``rest_terminate=True``."""
+  The rest-target kwargs act only with ``rest_terminate=True``.
+  ``critic_pelvis_height=False`` leaves the pelvis height out of the critic
+  group (the world-model state of a SHAC run); the ``*_noheight`` tasks set it
+  together with their height-free margin. ``critic_foot_terms=False`` also
+  drops the foot terms (``CRITIC_FOOT_TERMS``: foot height, air time, contact
+  flags and contact forces), leaving the actor terms + base_lin_vel -- the
+  ``*_noheight_nofoot`` tasks, whose critic group is a deployable world-model
+  state. ``critic_base_lin_vel=False`` drops base_lin_vel too, leaving exactly
+  the actor terms, noise-free (the ``*_noheight_nofoot_nolinvel`` tasks)."""
   if sampler not in SAMPLERS:
     raise ValueError(f"g1_recover sampler {sampler!r}: one of {SAMPLERS}")
   cfg = g1_stabilize_env_cfg(play=play)
   if not play:
     cfg.episode_length_s = float(episode_length_s)
-  if "critic" in cfg.observations:
+  if "critic" in cfg.observations and critic_pelvis_height:
     # Privileged critic group only (the actor is untouched): with base_lin_vel
     # (already in the group) and projected_gravity, the critic then sees every
     # term of g it can bind on but the transient non-foot contact. Inert unless
     # a run asks for the critic group (train_on_policy --privileged-critic).
     cfg.observations["critic"].terms["pelvis_height"] = ObservationTermCfg(
       func=pelvis_height)
+  if "critic" in cfg.observations and not critic_foot_terms:
+    terms = cfg.observations["critic"].terms
+    missing = [k for k in CRITIC_FOOT_TERMS if k not in terms]
+    if missing:
+      raise ValueError(f"the critic group has no {missing} to drop ({sorted(terms)})")
+    for k in CRITIC_FOOT_TERMS:
+      del terms[k]
+  if "critic" in cfg.observations and not critic_base_lin_vel:
+    terms = cfg.observations["critic"].terms
+    if "base_lin_vel" not in terms:
+      raise ValueError(f"the critic group has no base_lin_vel to drop ({sorted(terms)})")
+    del terms["base_lin_vel"]
   if rest_terminate:
     # A truncation (time_out=True), see rest.py: survival for the curricula,
     # terminal at its own margin for the avoid backup.
@@ -132,6 +160,39 @@ def g1_recover_env_cfg(play: bool = False,
     func=RecoverCurriculum, params=dict(common, ema=float(ema),
                                         online_alpha=float(online_alpha)))
   return cfg
+
+
+def g1_recover_noheight_env_cfg(play: bool = False, **kwargs) -> ManagerBasedRlEnvCfg:
+  """:func:`g1_recover_env_cfg` with no pelvis height in the critic group (the
+  ``*_noheight`` tasks, whose margin is ``g_fall_noheight``); same kwargs."""
+  if kwargs.pop("critic_pelvis_height", False):
+    raise ValueError("the *_noheight tasks have no pelvis height in the critic group")
+  return g1_recover_env_cfg(play=play, critic_pelvis_height=False, **kwargs)
+
+
+def g1_recover_noheight_nofoot_env_cfg(play: bool = False,
+                                       **kwargs) -> ManagerBasedRlEnvCfg:
+  """:func:`g1_recover_noheight_env_cfg` with no foot terms in the critic group
+  either (the ``*_noheight_nofoot`` tasks): the critic group, i.e. a SHAC
+  world-model state, is the actor terms + base_lin_vel (101-D); same kwargs."""
+  for k in ("critic_pelvis_height", "critic_foot_terms"):
+    if kwargs.pop(k, False):
+      raise ValueError(f"the *_noheight_nofoot tasks fix {k}=False")
+  return g1_recover_env_cfg(play=play, critic_pelvis_height=False,
+                            critic_foot_terms=False, **kwargs)
+
+
+def g1_recover_noheight_nofoot_nolinvel_env_cfg(play: bool = False,
+                                                **kwargs) -> ManagerBasedRlEnvCfg:
+  """:func:`g1_recover_noheight_nofoot_env_cfg` with no base_lin_vel in the
+  critic group either (the ``*_noheight_nofoot_nolinvel`` tasks): the critic
+  group, i.e. a SHAC world-model state, is exactly the actor terms, noise-free
+  (98-D); same kwargs."""
+  for k in ("critic_pelvis_height", "critic_foot_terms", "critic_base_lin_vel"):
+    if kwargs.pop(k, False):
+      raise ValueError(f"the *_noheight_nofoot_nolinvel tasks fix {k}=False")
+  return g1_recover_env_cfg(play=play, critic_pelvis_height=False,
+                            critic_foot_terms=False, critic_base_lin_vel=False, **kwargs)
 
 
 def g1_recover_k_env_cfg(play: bool = False, **kwargs) -> ManagerBasedRlEnvCfg:
