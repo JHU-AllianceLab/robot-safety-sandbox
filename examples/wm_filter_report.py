@@ -272,6 +272,10 @@ def survival(evals: list[dict], tags) -> dict:
     thermal = all("overheated" in d["conditions"][name] for d in evals)
     oh = cat(lambda r: r["overheated"].bool()) if thermal else None
     pk = cat(lambda r: r["tw_peak_c"].double()) if thermal else None
+    # *_thermal_cbf tasks: the temperature barrier's clip share and overshoots
+    barrier = all("cbf_clip_frac" in d["conditions"][name] for d in evals)
+    cf = cat(lambda r: r["cbf_clip_frac"].double()) if barrier else None
+    ol = cat(lambda r: r["cbf_over_limit"].bool()) if barrier else None
     row = {"label": label, "bins": {}, "per_seed": {}}
     # the seeds run the SAME episode list (row i is one episode in every run): an
     # episode's runs are one cluster, so the interval uses the per-episode mean over seeds
@@ -303,6 +307,9 @@ def survival(evals: list[dict], tags) -> dict:
                               fell_other=float((~sv[m] & ~oh[m]).double().mean()) if n
                               else math.nan,
                               tw_peak_mean_c=float(pk[m].mean()) if n else math.nan)
+      if barrier:
+        row["bins"][b].update(cbf_clip_frac=float(cf[m].mean()) if n else math.nan,
+                              cbf_over_limit=float(ol[m].double().mean()) if n else math.nan)
     for tag, d in zip(tags, evals):
       row["per_seed"][tag] = float(d["conditions"][name]["survived"].double().mean())
     out["filters"][name] = row
@@ -387,7 +394,10 @@ def main(argv=None):
           + ("  | overheated " + " ".join(f"{100 * row['bins'][b]['overheated']:4.1f}"
                                         for b in sv["bins"] + ["all"])
              + f" (peak winding {row['bins']['all']['tw_peak_mean_c']:.1f} C)"
-             if "overheated" in row["bins"]["all"] else ""))
+             if "overheated" in row["bins"]["all"] else "")
+          + (f"  | barrier clips {100 * row['bins']['all']['cbf_clip_frac']:.1f}% of motor-steps, "
+             f"over its limit in {100 * row['bins']['all']['cbf_over_limit']:.1f}% of episodes"
+             if "cbf_clip_frac" in row["bins"]["all"] else ""))
   if a.pick_videos:
     print(f"  best WM tube filters: {rep['videos']['best_wm']}")
     for k, v in rep["videos"]["categories"].items():

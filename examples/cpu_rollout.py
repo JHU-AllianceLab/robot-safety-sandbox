@@ -31,7 +31,9 @@ measures how well):
   ``(85 C - max Tw) / 10 C``, the episode ending at 85 C as in mjlab; the
   winding / housing / structure temperatures are part of the seeded state and
   the sysID heat model is integrated after every mj_step, as
-  ``envs/g1_recover/thermal.py`` does); or, on a task that ends on leaving K (``k_failure``,
+  ``envs/g1_recover/thermal.py`` does; on a ``*_thermal_cbf`` task the
+  temperature barrier clips the joint targets before every mj_step, as
+  ``thermal.ThermalBarrierAction`` does, and the margin has no thermal term); or, on a task that ends on leaving K (``k_failure``,
   e.g. ``g1_recover_bench``), K's margin (``k_set.margin_from_terms``: pelvis
   height, tilt, every joint within its range + 0.1 rad, no non-foot contact,
   read as mjlab's termination reads it: the derived pose and contact
@@ -324,13 +326,13 @@ def build_spec(env, actor_path: str, out_dir: str, margin: str = "auto",
   if margin not in ("fall", "k"):
     raise SystemExit(f"[rollout] margin {margin!r}: fall | k | auto")
   t_margin = getattr(avoid, "thermal", None)
-  if therm is not None:
-    if margin != "fall" or t_margin is None:
-      raise SystemExit("[rollout] a motor thermal state needs the fall margin with its thermal "
-                       "term (g_fall_noheight_thermal)")
+  if therm is not None and margin != "fall":
+    raise SystemExit("[rollout] a motor thermal state needs the fall margin")
+  if t_margin is not None:
+    # the *_thermal tasks: the hottest winding in the margin, an overheat termination
+    if therm is None:
+      raise SystemExit("[rollout] the margin has a thermal term but the env no thermal state")
     therm.update(limit_c=float(t_margin["limit_c"]), scale_c=float(t_margin["scale_c"]))
-  elif t_margin is not None:
-    raise SystemExit("[rollout] the margin has a thermal term but the env no thermal state")
   k_extra = {}
   if margin == "k":
     found = _sensor_adr(m, "nonfoot_ground_touch_", "_found")
@@ -378,9 +380,21 @@ def _thermal_spec(mj, robot) -> dict | None:
   # through these: motor i -> model actuator, joint dof
   ctrl_ids = _np(robot.indexing.ctrl_ids).astype(np.int64).reshape(-1)
   vadr = _np(robot.indexing.joint_v_adr).astype(np.int64).reshape(-1)
-  return dict(sysid_dir=str(SYSID_DIR), params=params,
-              act=ctrl_ids[_np(st.act_perm).astype(np.int64)],
-              vadr=vadr[_np(st.jnt_perm).astype(np.int64)], dt=float(mj.physics_dt))
+  qadr = _np(robot.indexing.joint_q_adr).astype(np.int64).reshape(-1)
+  jperm = _np(st.jnt_perm).astype(np.int64)
+  out = dict(sysid_dir=str(SYSID_DIR), params=params,
+             act=ctrl_ids[_np(st.act_perm).astype(np.int64)],
+             vadr=vadr[jperm], dt=float(mj.physics_dt), barrier=None)
+  term = mj.action_manager.get_term("joint_pos")
+  if hasattr(term, "safe_targets"):
+    # the *_thermal_cbf tasks (thermal.ThermalBarrierAction): the same clip of the
+    # joint targets before every mj_step; PD gains of each motor's joint, motor order
+    m2t = _np(term.m2t).astype(np.int64)
+    out["barrier"] = dict(limit_c=float(term.limit_c), gamma=float(term.gamma),
+                          kp=_np(term.kp)[m2t].astype(np.float64),
+                          kd=_np(term.kd)[m2t].astype(np.float64), qadr=qadr[jperm],
+                          pairs={k: tuple(v) for k, v in term.pairs.items()})
+  return out
 
 
 def live_state(env, ids: torch.Tensor):
@@ -463,11 +477,39 @@ class Roller:
     w = th.motor_speed(d.qvel[t["vadr"]].astype(np.float64))
     self.temps[key] = th.step(self.temps[key], tau, w, t["dt"])
 
+  def _barrier(self, d: mujoco.MjData, c_nom: np.ndarray, key) -> None:
+    """The temperature barrier on this substep's targets
+    (``thermal.ThermalBarrierAction.safe_targets``, numpy): the PD torque of the
+    nominal targets, split per motor, clipped to each motor's bound, mapped
+    back; only the targets of clipped motors (and their linkage partners) move."""
+    th, t = self.th, self.s.thermal
+    b = t["barrier"]
+    q, qd = d.qpos[b["qadr"]].astype(np.float64), d.qvel[t["vadr"]].astype(np.float64)
+    tgt = c_nom[t["act"]]
+    tau = b["kp"] * (tgt - q) - b["kd"] * qd                    # joint torques, motor order
+    tau_m = th.motor_torque(tau)
+    f, g = th.affine_terms(self.temps[key], th.motor_speed(qd))
+    u_bar = (b["gamma"] * (b["limit_c"] - self.temps[key][0]) - f) / g
+    tau_bar = np.sqrt(np.maximum(u_bar, 0.0))
+    clipped = np.abs(tau_m) > tau_bar
+    safe = np.clip(tau_m, -tau_bar, tau_bar)
+    tau_j = safe.copy()
+    moved = clipped.copy()
+    for name, (p, r) in b["pairs"].items():
+      sg = float(th.linkage_sign[name])
+      tau_j[p], tau_j[r] = safe[p] + safe[r], sg * (safe[p] - safe[r])
+      moved[p] = moved[r] = clipped[p] or clipped[r]
+    d.ctrl[t["act"]] = np.where(moved, q + (tau_j + b["kd"] * qd) / b["kp"], tgt)
+
   def control_step(self, slot: int, a: np.ndarray, r: int = 0) -> float:
     """``a`` (env action units) for one control step; returns g after it."""
     s, m, d = self.s, self.models[slot], self._d(slot, r)
     d.ctrl[:] = s.act_offset + s.act_scale * (s.ctrl_gain * a[s.act_index]) - s.ctrl_bias[slot]
+    barrier = self.th is not None and s.thermal.get("barrier") is not None
+    c_nom = d.ctrl.copy() if barrier else None
     if s.margin == "k":
+      if self.th is not None:
+        raise ValueError("a thermal rollout runs on the fall margin")
       for _ in range(s.decimation):
         mujoco.mj_step(m, d)
       # mjlab reads its terminations, its margin and (sensor cache) the contact
@@ -479,13 +521,15 @@ class Roller:
       return self.margin_k(d)
     peak = 0.0
     for _ in range(s.decimation):
+      if barrier:
+        self._barrier(d, c_nom, (slot, r))
       mujoco.mj_step(m, d)
       if self.th is not None:
         self._heat(d, (slot, r))
       f = d.sensordata[s.force_adr[:, None] + np.arange(3)]
       peak = max(peak, float(np.sqrt((f * f).sum(1)).max()))
     g = self.margin(d, peak)
-    if self.th is not None:
+    if self.th is not None and "scale_c" in s.thermal:
       t = s.thermal
       hottest = float(self.temps[(slot, r)][0].max())
       g = min(g, float(np.clip((t["limit_c"] - hottest) / t["scale_c"], -s.clamp, s.clamp)))

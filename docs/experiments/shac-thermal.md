@@ -7,13 +7,22 @@ model in the loop and one more constraint: **every motor winding stays below
 85 °C**. It covers what changed (software stack, robot, heat model, task),
 the decisions behind each change, the commands, and the checks that have run.
 
-**Status (2026-11-10).** Code and configs are written, unit-tested,
-checked on a GPU, and the end-to-end smoke test passed (job 1768194, §7;
-two earlier ones failed on the migration traps of §8). The 3-seed training
-(array 1768777; started 05:25 / 08:24 on an A100 / two L40S, 21k / 29k fps)
-and the per-seed report (array 1768778, `aftercorr` on training) are
-running. Everything is committed on `feat/shac-thermal-mjc316` (§1); the
-cluster has no GitHub credentials, so push it from a terminal that does.
+> **Redesigned 2026-11-10: read §10 first.** Thermal safety is now a
+> temperature barrier (a CBF) BELOW every controller, clipping each motor's
+> torque so its winding stays below **70 °C**; temperature is out of the
+> margin and there is no overheat termination (tasks `*_thermal_cbf`,
+> `configs/sweeps/shac_thermal_cbf`). The 85 °C-margin design of §3–§6 is
+> kept in the code (tasks `*_thermal`) but its runs were cancelled.
+
+**Status (2026-11-10).** The 85 °C-margin design (§3–§6) passed its smoke
+test (job 1768194) and trained until it was cancelled (array 1768777; its
+seeds had also restarted from scratch after node failures). The barrier
+design (§10) is implemented, unit-tested (33 tests) and passed its smoke
+test (job 1785986); its 3-seed training (array 1786551) and report (array
+1786552, `aftercorr`) are submitted.
+Everything up to the redesign is committed on `feat/shac-thermal-mjc316`
+(§1); the cluster has no GitHub credentials, so push it from a terminal that
+does.
 
 ## 1. Software stack: a new branch and a new conda env
 
@@ -251,3 +260,64 @@ Outputs: `runs/shac_thermal/shac_s{0,1,2}/g1_recover_thermal_safetyshac1p/`,
   with the heat scale (sysID README), and the model's weak spot is a loaded
   joint held still near 60–70 °C, where the real motor can be ~9 °C hotter.
   The 85 °C limit has no extra margin for that.
+
+## 10. Redesign (2026-11-10): a temperature barrier below the policy
+
+**The design.** Thermal safety moves out of the RL objective into a layer
+below whatever drives the robot (SHAC, SONIC, every filter), as a low-level
+thermal guard on the real G1 would act:
+
+- **The barrier.** Per motor, a control barrier function on
+  $h = T_{\text{cbf}} - T_w$ with $T_{\text{cbf}} = 70$ °C and $\gamma = 1\ \text{s}^{-1}$.
+  The winding dynamics are affine in $u = \tau_m^2$
+  ($\dot T_w = f(T,\omega) + g(T_w,\omega)\,u$, `MotorThermal.affine_terms`), so
+  $\dot h \ge -\gamma h$ is
+  $u \le \bar u = (\gamma (T_{\text{cbf}} - T_w) - f)/g$ and
+  $|\tau_m| \le \bar\tau = \sqrt{\max(\bar u, 0)}$.
+- **Where it acts.** `thermal.ThermalBarrierAction` (a `JointPositionAction`)
+  runs before every physics substep. It computes the PD torque the dcmotor
+  will apply, $k_p(q^* - q) - k_d\dot q$, splits it into motor torques (ankle /
+  waist linkages), clips each motor to $\bar\tau$, maps back to joint torques,
+  and rewrites only the targets that changed:
+  $q^* = q + (\tau + k_d\dot q)/k_p$. The motor-space clip handles the
+  linkages exactly.
+- **The objective.** Margin `g_fall_noheight` (tilt, non-foot contact) alone,
+  the same as the no-height task; no overheat termination. The policy meets
+  temperature only through the torque it loses.
+- **Start temperatures.** Level U(30, 70) per robot, each winding U(30, level),
+  housing 0–20 °C cooler: every episode starts inside the barrier's safe set.
+- **Observations.** Unchanged: actor 127-D (winding temperatures),
+  critic / world-model state 171-D (winding and housing).
+
+**What the barrier cannot guarantee.** With $\bar u < 0$ (speed heating, or a
+winding that does not cool fast enough even at zero torque) the motor gets
+zero torque and the winding can still cross 70 °C. Acting once per 5 ms
+substep, with $f$ and $g$ from the substep's start, can overshoot slightly. The
+metrics `cbf_clip_frac` (share of motors clipped), `cbf_negative_bound_frac`
+(share with $\bar u < 0$) and `cbf_overshoot_c` (episode peak above 70 °C)
+track both in training. The eval records per episode `cbf_clip_frac` and
+`cbf_over_limit`, and the report prints them per filter.
+
+**The pipeline.** The CPU rollout filter (`rollout:1`) applies the same clip
+before every `mj_step` (`Roller._barrier`, checked against the torch version
+in `tests/test_g1_thermal.py`), and its margin drops the thermal term with
+the task's.
+
+| Piece | Path |
+|---|---|
+| Barrier, metrics | `robot_safety_sandbox/envs/g1_recover/thermal.py` (`ThermalBarrierAction`, `barrier_bound`, `joint_torque`, `cbf_*`) |
+| Builder, tasks | `env_cfg.py` (`g1_recover_thermal_cbf_env_cfg`; `thermal_barrier_c`, `thermal_barrier_gamma`, `thermal_overheat_termination` kwargs), `tasks/g1_recover.py` (`g1_recover_thermal_cbf`, `g1_recover_lafan_thermal_cbf`) |
+| Config | `configs/g1_recover_sonic_thermal_cbf_safetyshac1p.yaml` (the no-height recipe verbatim; the identified-G1 bank) |
+| Sweep | `configs/sweeps/shac_thermal_cbf/`: `smoke.sh`, `jobs.txt`, `wmreport_jobs.txt`, `wmreport_seed.sh` → `runs/shac_thermal_cbf/` |
+
+Run order: `smoke.sh` (the bank of `configs/sweeps/shac_thermal/data_jobs.txt`
+must exist), then `jobs.txt` as an array, then `wmreport_seed.sh` (the
+sbatch lines are in each file's header).
+
+**Smoke test (job 1785986, passed, 11 min).** CPU rollout vs GPU env after one
+step: joint positions within 1.3e-6 (the barrier clips the same way in both),
+winding temperatures within 8e-6 °C, margin p99 0.010, rollout verdicts 100 %
+equal. On 64 kicked episodes the barrier clipped 1.7 % of SONIC's motor-steps
+(0.1 % of the 3M-step smoke policy's); the hottest winding peaked at 69.6 °C at
+most and no episode of any condition went over 70 °C. SONIC alone survived
+53.1 %. Start temperatures were identical across conditions and all ≤ 70 °C.

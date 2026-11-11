@@ -106,6 +106,12 @@ def motor_thermal_cls():
   return _g1_sysid_pkg().MotorThermal
 
 
+def linkages() -> dict:
+  """``{name: (pitch slot, roll slot)}`` of the motor pairs behind the ankle /
+  waist linkages, in Unitree motor order (``g1_sysid.LINKAGES``)."""
+  return dict(_g1_sysid_pkg().LINKAGES)
+
+
 def get_spec():
   """mjlab's G1 spec with the measured waist ranges and the refitted collision
   geometry (the sysID repo's ``get_spec``)."""

@@ -88,6 +88,12 @@ below, whose target is the stance set after the push.
                           a winding at 85 C ends the episode, start temperatures
                           drawn per reset; actor + 29 winding temperatures,
                           critic group + winding and housing temperatures.
+``g1_recover_thermal_cbf``, ``g1_recover_lafan_thermal_cbf``
+                          the *_thermal tasks with thermal safety moved BELOW the
+                          policy: a 70 C temperature barrier clips every motor's
+                          torque (whatever drives the robot), temperature is out
+                          of the margin (g_fall_noheight) and the terminations,
+                          start levels U(30, 70).
 ``g1_recover_lafan_sysid`` g1_recover_lafan on the identified G1, no
                           temperatures: SONIC's start states on that robot.
 ``g1_recover_bench``     the SONIC push benchmark's world (``envs/g1_recover/
@@ -138,7 +144,7 @@ def register_all() -> None:
   from robot_safety_sandbox.envs.g1_recover.env_cfg import (
     g1_recover_env_cfg, g1_recover_k_env_cfg, g1_recover_noheight_env_cfg,
     g1_recover_noheight_nofoot_env_cfg, g1_recover_noheight_nofoot_nolinvel_env_cfg,
-    g1_recover_sysid_env_cfg, g1_recover_thermal_env_cfg)
+    g1_recover_sysid_env_cfg, g1_recover_thermal_cbf_env_cfg, g1_recover_thermal_env_cfg)
   from robot_safety_sandbox.envs.g1_recover.k_set import CLAMP as K_CLAMP, g_k
   from robot_safety_sandbox.envs.g1_recover.thermal import g_fall_noheight_thermal
   from robot_safety_sandbox.envs.g1_recover.targets import make_l_stance
@@ -299,6 +305,24 @@ def register_all() -> None:
     kwargs=lafan_kwargs(),
     description="g1_recover_lafan_noheight on the identified G1 with its motor heat "
                 "model: no fall and every winding below 85 C (avoid-only, single-player)."))
+  # THE TEMPERATURE BARRIER below the policy (thermal.ThermalBarrierAction; the
+  # user's decoupled design, 2026-11-10): every motor's torque clipped so its
+  # winding stays below 70 C, for whatever drives the robot. Temperature leaves
+  # the margin (g_fall_noheight, as the *_noheight tasks) and the terminations;
+  # start levels U(30, 70). Observations as the *_thermal tasks.
+  register(TaskSpec(
+    task_id="g1_recover_thermal_cbf", cfg_builder=g1_recover_thermal_cbf_env_cfg,
+    margin_fn=compose(g_fall_noheight), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, kwargs=dict(G1_BRIDGE_KWARGS),
+    description="g1_recover_noheight on the identified G1 with its motor heat model and "
+                "a 70 C temperature barrier clipping every motor's torque (avoid-only)."))
+  register(TaskSpec(
+    task_id="g1_recover_lafan_thermal_cbf", cfg_builder=g1_recover_thermal_cbf_env_cfg,
+    margin_fn=compose(g_fall_noheight), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, dstb_dim=3, supports_adversary=False,
+    kwargs=lafan_kwargs(),
+    description="g1_recover_lafan_noheight on the identified G1 with its motor heat model "
+                "and a 70 C temperature barrier (avoid-only, single-player)."))
   # The identified G1 without temperatures: g1_recover_lafan's world (margin
   # g_fall, its terminations) on the robot the *_thermal tasks use, for
   # harvesting SONIC's start states on it.

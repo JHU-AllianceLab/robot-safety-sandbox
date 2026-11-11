@@ -222,6 +222,9 @@ def g1_recover_thermal_env_cfg(play: bool = False, v_bus: float | None = None,
                                thermal_start_floor_c: float = 30.0,
                                thermal_housing_gap_c=(0.0, 20.0),
                                thermal_sim_heat_scale: bool = True,
+                               thermal_overheat_termination: bool = True,
+                               thermal_barrier_c: float | None = None,
+                               thermal_barrier_gamma: float | None = None,
                                **kwargs) -> ManagerBasedRlEnvCfg:
   """:func:`g1_recover_noheight_env_cfg` on the lab's identified G1 with its
   motor heat model in the loop (the ``*_thermal`` tasks, ``thermal.py``):
@@ -229,18 +232,26 @@ def g1_recover_thermal_env_cfg(play: bool = False, v_bus: float | None = None,
   * actor obs + ``motor_temp`` (29 winding temperatures, +-0.5 C noise): 127-D;
   * critic group (the world-model state) + ``motor_temp`` and
     ``motor_temp_housing`` (noise-free): 113 + 58 = 171-D;
-  * termination ``motor_overheat`` (a winding at 85 C: the robot goes limp);
+  * termination ``motor_overheat`` (a winding at 85 C: the robot goes limp),
+    unless ``thermal_overheat_termination=False``;
   * metrics term ``motor_temp_max``: integrates the heat model every physics
-    substep, draws the start temperatures at reset, logs the episode's peak.
+    substep, draws the start temperatures at reset, logs the episode's peak;
+  * with ``thermal_barrier_c`` (the ``*_thermal_cbf`` tasks): the temperature
+    barrier on the joint targets (``thermal.ThermalBarrierAction``, limit
+    ``thermal_barrier_c``, rate ``thermal_barrier_gamma``) and its metrics
+    ``cbf_clip_frac``, ``cbf_negative_bound_frac``, ``cbf_overshoot_c``.
 
-  The margin (``g_fall_noheight_thermal``) is the task registration's. The
-  ``thermal_*`` kwargs set :class:`~robot_safety_sandbox.envs.g1_recover.thermal.ThermalCfg`."""
+  The margin is the task registration's. The other ``thermal_*`` kwargs set
+  :class:`~robot_safety_sandbox.envs.g1_recover.thermal.ThermalCfg`."""
+  import dataclasses
+
   from mjlab.managers.metrics_manager import MetricsTermCfg
   from mjlab.utils.noise import UniformNoiseCfg
 
   from robot_safety_sandbox.envs.g1_recover.thermal import (
-    LIMIT_C, ThermalCfg, ThermalIntegrator, motor_housing_temp, motor_overheat,
-    motor_winding_temp)
+    CBF_GAMMA, LIMIT_C, ThermalBarrierActionCfg, ThermalCfg, ThermalIntegrator,
+    cbf_clip_frac, cbf_negative_bound_frac, cbf_overshoot_c, motor_housing_temp,
+    motor_overheat, motor_winding_temp)
   if kwargs.pop("critic_pelvis_height", False):
     raise ValueError("the *_thermal tasks fix critic_pelvis_height=False")
   cfg = g1_recover_env_cfg(play=play, critic_pelvis_height=False, **kwargs)
@@ -256,11 +267,43 @@ def g1_recover_thermal_env_cfg(play: bool = False, v_bus: float | None = None,
     func=motor_winding_temp, params=dict(p))
   cfg.observations["critic"].terms["motor_temp_housing"] = ObservationTermCfg(
     func=motor_housing_temp, params=dict(p))
-  cfg.terminations["motor_overheat"] = TerminationTermCfg(
-    func=motor_overheat, params=dict(p, limit_c=LIMIT_C))
+  if thermal_overheat_termination:
+    cfg.terminations["motor_overheat"] = TerminationTermCfg(
+      func=motor_overheat, params=dict(p, limit_c=LIMIT_C))
   cfg.metrics["motor_temp_max"] = MetricsTermCfg(
     func=ThermalIntegrator, params=dict(p), per_substep=True, reduce="max")
+  if thermal_barrier_c is not None:
+    old = cfg.actions["joint_pos"]
+    keep = {f.name: getattr(old, f.name) for f in dataclasses.fields(old) if f.init}
+    gamma = CBF_GAMMA if thermal_barrier_gamma is None else float(thermal_barrier_gamma)
+    cfg.actions["joint_pos"] = ThermalBarrierActionCfg(
+      **keep, limit_c=float(thermal_barrier_c), gamma=gamma, thermal_cfg=tc)
+    lim = {"limit_c": float(thermal_barrier_c)}
+    cfg.metrics["cbf_clip_frac"] = MetricsTermCfg(func=cbf_clip_frac)
+    cfg.metrics["cbf_negative_bound_frac"] = MetricsTermCfg(func=cbf_negative_bound_frac)
+    cfg.metrics["cbf_overshoot_c"] = MetricsTermCfg(func=cbf_overshoot_c, params=lim,
+                                                    reduce="max")
+  elif thermal_barrier_gamma is not None:
+    raise ValueError("thermal_barrier_gamma without thermal_barrier_c")
   return cfg
+
+
+def g1_recover_thermal_cbf_env_cfg(play: bool = False, **kwargs) -> ManagerBasedRlEnvCfg:
+  """:func:`g1_recover_thermal_env_cfg` with the temperature barrier as a layer
+  below the policy (the ``*_thermal_cbf`` tasks; the user's design,
+  2026-11-10): every motor's torque clipped so its winding stays below
+  ``CBF_LIMIT_C`` = 70 C (rate ``CBF_GAMMA`` = 1/s); start levels U(30, 70), so
+  every episode starts inside the barrier's safe set; no overheat termination
+  (the margin, ``g_fall_noheight``, is the registration's: temperature is
+  not in it). Observations as the ``*_thermal`` tasks (actor 127-D, critic
+  171-D). Same kwargs."""
+  from robot_safety_sandbox.envs.g1_recover.thermal import CBF_GAMMA, CBF_LIMIT_C
+  kwargs.setdefault("thermal_start_level_c", (30.0, CBF_LIMIT_C))
+  kwargs.setdefault("thermal_barrier_c", CBF_LIMIT_C)
+  kwargs.setdefault("thermal_barrier_gamma", CBF_GAMMA)
+  if kwargs.pop("thermal_overheat_termination", False):
+    raise ValueError("the *_thermal_cbf tasks have no overheat termination")
+  return g1_recover_thermal_env_cfg(play=play, thermal_overheat_termination=False, **kwargs)
 
 
 def g1_recover_k_env_cfg(play: bool = False, **kwargs) -> ManagerBasedRlEnvCfg:

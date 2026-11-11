@@ -51,23 +51,46 @@ critic group is a SHAC run's world-model state, so the model predicts both and
 the margin head can read the thermal term. ``Ts`` stays out: unmeasured, and
 it does not change within an episode.
 
-MARGIN AND TERMINATION. ``g_thermal = (LIMIT_C - max Tw) / SCALE_C``: 1 at
-75 C, 0 at the limit, so it competes with the fall terms (tilt, non-foot
-contact; both 1 when comfortably safe) only in the last ~10 C.
+MARGIN AND TERMINATION (``*_thermal`` tasks). ``g_thermal = (LIMIT_C - max
+Tw) / SCALE_C``: 1 at 75 C, 0 at the limit, so it competes with the fall terms
+(tilt, non-foot contact; both 1 when comfortably safe) only in the last ~10 C.
 ``motor_overheat`` ends the episode, as a failure, once ``max Tw >= LIMIT_C``.
+
+THE TEMPERATURE BARRIER (``*_thermal_cbf`` tasks, :class:`ThermalBarrierAction`;
+the user's design, 2026-11-10). Thermal safety becomes a layer BELOW whatever
+drives the robot (SHAC, SONIC, a filter), decoupled from the task's margin: a
+control barrier function per motor on ``h = T_cbf - Tw`` (``T_cbf`` = 70 C)
+clips the motor torque. The winding dynamics are affine in ``u = tau_m^2``
+(``MotorThermal.affine_terms``: ``dTw/dt = f(T, w) + g(Tw, w) u``, ``g > 0``),
+so ``dh/dt >= -gamma h`` is ``u <= u_bar = (gamma (T_cbf - Tw) - f) / g`` and
+``|tau_m| <= sqrt(max(u_bar, 0))``. Every physics substep, the term takes the
+nominal joint targets, computes the PD torque the dcmotor will apply,
+``kp (q* - q) - kd dq``, splits it into motor torques (ankle / waist
+linkages), clips each motor to its bound, maps back to joint torques and
+rewrites only the targets that changed, ``q* = q + (tau + kd dq) / kp``. With
+``u_bar < 0`` (the winding heats or fails to cool even at zero torque, e.g.
+speed heating) the motor gets zero torque and the barrier can still be
+crossed: the term counts those cases. The margin of these tasks is the fall
+margin alone (``g_fall_noheight``) and there is no overheat termination: the
+policy meets the temperatures only through the torque it loses.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 
 import torch
+from mjlab.envs.mdp.actions.actions import JointPositionAction, JointPositionActionCfg
 from mjlab.managers.manager_base import ManagerTermBase
 
-from robot_safety_sandbox.envs.assets.g1_sysid import motor_thermal_cls
+from robot_safety_sandbox.envs.assets.g1_sysid import linkages, motor_thermal_cls
 
 #: winding temperature limit, C: the G1 controller's damping threshold
 LIMIT_C = 85.0
+#: the temperature barrier's limit, C, and its class-K rate, 1/s (*_thermal_cbf tasks)
+CBF_LIMIT_C = 70.0
+CBF_GAMMA = 1.0
 #: margin scale, C: g_thermal = 1 at LIMIT_C - SCALE_C
 SCALE_C = 10.0
 #: attribute of the mjlab env that holds its MotorThermalState
@@ -235,3 +258,147 @@ def g_fall_noheight_thermal(env) -> torch.Tensor:
 g_fall_noheight_thermal.fall_height_term = False
 #: what a CPU rollout must add to the fall margin (cpu_rollout.build_spec)
 g_fall_noheight_thermal.thermal = dict(limit_c=LIMIT_C, scale_c=SCALE_C)
+
+
+# --- the temperature barrier (*_thermal_cbf tasks) ---------------------------------
+
+def barrier_bound(state: MotorThermalState, w: torch.Tensor, limit_c: float,
+                  gamma: float) -> tuple[torch.Tensor, torch.Tensor]:
+  """``(tau_bar, u_bar)``, ``(num_envs, 29)``: each motor's torque bound from the
+  barrier ``h = limit_c - Tw`` at motor speeds ``w`` -- ``u_bar = (gamma h - f) /
+  g`` (``dh/dt >= -gamma h`` with ``dTw/dt = f + g tau_m^2``) and ``tau_bar =
+  sqrt(max(u_bar, 0))``. ``u_bar < 0``: no torque keeps the condition."""
+  f, g = state.th.affine_terms(state.T, w)
+  u_bar = (float(gamma) * (float(limit_c) - state.Tw) - f) / g
+  return torch.sqrt(u_bar.clamp_min(0.0)), u_bar
+
+
+def joint_torque(th, tau_m: torch.Tensor, pairs: dict) -> torch.Tensor:
+  """Per-motor torques ``(..., 29)`` -> joint torques, both in motor order: the
+  inverse of ``MotorThermal.motor_torque`` (a linkage pair's motors carry
+  ``(tau_p +- s tau_r) / 2``, so ``tau_p = m_p + m_r``, ``tau_r = s (m_p - m_r)``)."""
+  out = tau_m.clone()
+  for name, (p, r) in pairs.items():
+    s = float(th.linkage_sign[name])
+    out[..., p] = tau_m[..., p] + tau_m[..., r]
+    out[..., r] = s * (tau_m[..., p] - tau_m[..., r])
+  return out
+
+
+@dataclass(kw_only=True)
+class ThermalBarrierActionCfg(JointPositionActionCfg):
+  """``JointPositionActionCfg`` whose targets the temperature barrier clips
+  (module docstring); same fields, plus the barrier's limit and rate."""
+
+  limit_c: float = CBF_LIMIT_C
+  gamma: float = CBF_GAMMA
+  thermal_cfg: ThermalCfg = field(default_factory=ThermalCfg)
+
+  def build(self, env) -> ThermalBarrierAction:
+    return ThermalBarrierAction(self, env)
+
+
+class ThermalBarrierAction(JointPositionAction):
+  """Joint position targets, then the per-motor temperature barrier, every
+  physics substep (``apply_actions`` runs inside the decimation loop, before
+  each ``mj_step``; the thermal state is the previous substep's). It acts on
+  whatever writes the actions -- a policy, SONIC, a filter -- as a low-level
+  guard on the robot would."""
+
+  cfg: ThermalBarrierActionCfg
+
+  def __init__(self, cfg: ThermalBarrierActionCfg, env):
+    super().__init__(cfg=cfg, env=env)
+    self.state = thermal_state(env, cfg.thermal_cfg)
+    ent = self._entity
+    joints = list(ent.joint_names)
+    tnames = [joints[i] for i in self._target_ids.tolist()]
+    missing = [n for n in self.state.names if n + "_joint" not in tnames]
+    if missing:
+      raise ValueError(f"the barrier action does not drive the joints of motors {missing}")
+    #: motor i -> its joint's column among the action targets
+    self.m2t = torch.tensor([tnames.index(n + "_joint") for n in self.state.names],
+                            device=self.device)
+    kp = [math.nan] * len(tnames)
+    kd = [math.nan] * len(tnames)
+    for act in ent.actuators:
+      st, dp = getattr(act.cfg, "stiffness", None), getattr(act.cfg, "damping", None)
+      for n in act.target_names:
+        if n in tnames and st is not None and dp is not None:
+          kp[tnames.index(n)], kd[tnames.index(n)] = float(st), float(dp)
+    if any(not (k > 0.0) for k in kp) or any(math.isnan(k) for k in kd):
+      raise ValueError("the barrier needs every target joint driven by a PD actuator "
+                       "(stiffness > 0, damping)")
+    self.kp = torch.tensor(kp, device=self.device)
+    self.kd = torch.tensor(kd, device=self.device)
+    self.limit_c, self.gamma = float(cfg.limit_c), float(cfg.gamma)
+    self.pairs = linkages()
+    n = self.num_envs
+    self._clip_acc = torch.zeros(n, device=self.device)
+    self._neg_acc = torch.zeros(n, device=self.device)
+    self._n_sub = 0
+
+  def process_actions(self, actions: torch.Tensor) -> None:
+    super().process_actions(actions)
+    self._clip_acc.zero_()
+    self._neg_acc.zero_()
+    self._n_sub = 0
+
+  def safe_targets(self, target: torch.Tensor, q: torch.Tensor, qd: torch.Tensor):
+    """``(target', clipped, u_bar)`` for joint targets / positions / velocities
+    ``(num_envs, n_targets)`` in the action's order; ``clipped`` and ``u_bar``
+    per motor ``(num_envs, 29)``."""
+    th = self.state.th
+    tau = self.kp * (target - q) - self.kd * qd                 # the PD torque the dcmotor applies
+    tau_m = th.motor_torque(tau[:, self.m2t])
+    w = th.motor_speed(qd[:, self.m2t])
+    tau_bar, u_bar = barrier_bound(self.state, w, self.limit_c, self.gamma)
+    clipped = tau_m.abs() > tau_bar
+    safe_m = torch.minimum(torch.maximum(tau_m, -tau_bar), tau_bar)
+    tau_j = joint_torque(th, safe_m, self.pairs)                # motor order
+    moved = clipped.clone()                                     # a clipped linkage motor moves both joints
+    for p, r in self.pairs.values():
+      both = clipped[:, p] | clipped[:, r]
+      moved[:, p], moved[:, r] = both, both
+    tau_safe = tau.clone()
+    tau_safe[:, self.m2t] = tau_j
+    mask = torch.zeros_like(tau, dtype=torch.bool)
+    mask[:, self.m2t] = moved
+    target = torch.where(mask, q + (tau_safe + self.kd * qd) / self.kp, target)
+    return target, clipped, u_bar
+
+  def apply_actions(self) -> None:
+    ent = self._entity
+    ids = self._target_ids
+    target = self._processed_actions - ent.data.encoder_bias[:, ids]
+    target, clipped, u_bar = self.safe_targets(target, ent.data.joint_pos[:, ids],
+                                               ent.data.joint_vel[:, ids])
+    ent.set_joint_position_target(target, joint_ids=ids)
+    self._clip_acc += clipped.float().mean(1)
+    self._neg_acc += (u_bar < 0.0).float().mean(1)
+    self._n_sub += 1
+
+  @property
+  def clip_frac(self) -> torch.Tensor:
+    """Share of motors clipped, averaged over this env step's substeps, ``(num_envs,)``."""
+    return self._clip_acc / max(self._n_sub, 1)
+
+  @property
+  def negative_bound_frac(self) -> torch.Tensor:
+    """Share of motors whose bound was negative (no torque keeps the barrier)."""
+    return self._neg_acc / max(self._n_sub, 1)
+
+
+def cbf_clip_frac(env, action_name: str = "joint_pos") -> torch.Tensor:
+  """Metric: share of motors the barrier clipped this step."""
+  return env.action_manager.get_term(action_name).clip_frac
+
+
+def cbf_negative_bound_frac(env, action_name: str = "joint_pos") -> torch.Tensor:
+  """Metric: share of motors with no torque that keeps the barrier this step."""
+  return env.action_manager.get_term(action_name).negative_bound_frac
+
+
+def cbf_overshoot_c(env, limit_c: float = CBF_LIMIT_C) -> torch.Tensor:
+  """Metric: how far the hottest winding is above the barrier's limit, C (>= 0)."""
+  return (thermal_state(env).Tw.amax(dim=1) - float(limit_c)).clamp_min(0.0)

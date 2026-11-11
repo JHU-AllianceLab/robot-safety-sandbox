@@ -801,10 +801,17 @@ class Evaluator:
     # hottest winding at the spawn and over the episode (before its last step;
     # >= LIMIT_C when it overheated)
     therm = thermal_state(mj) if has_thermal(mj) else None
+    # *_thermal_cbf tasks: the temperature barrier below every controller -- per
+    # episode, the mean share of motors it clipped and whether the hottest
+    # winding still went over its limit
+    bar_term = mj.action_manager.get_term("joint_pos") if therm is not None else None
+    bar_c = getattr(bar_term, "limit_c", None)
+    has_oh = therm is not None and "motor_overheat" in mj.termination_manager.active_terms
     if therm is not None:
       ep_over = torch.zeros(E, dtype=torch.bool, device=dev)
       ep_tw_peak = torch.full((E,), math.nan, device=dev)
       ep_tw_start = torch.full((E,), math.nan, device=dev)
+      ep_clip = torch.full((E,), math.nan, device=dev)
     waves = (E + n - 1) // n
     for w, w0 in enumerate(range(0, E, n)):
       w1 = min(E, w0 + n)
@@ -834,6 +841,8 @@ class Evaluator:
         tw_start = therm.Tw.amax(1).clone()
         tw_peak = tw_start.clone()
         over = torch.zeros(n, dtype=torch.bool, device=dev)
+        clip_sum = torch.zeros(n, device=dev)
+        clip_cnt = torch.zeros(n, device=dev)
       k = torch.zeros(n, dtype=torch.long, device=dev)
       if on_step is not None:
         on_step(ep, k, None)
@@ -931,7 +940,11 @@ class Evaluator:
         if therm is not None:
           # a done env has respawned with new temperatures: keep its pre-step peak
           tw_peak = torch.where(dones, tw_peak, torch.maximum(tw_peak, therm.Tw.amax(1)))
-          over = mj.termination_manager.get_term("motor_overheat") & dones
+          over = (mj.termination_manager.get_term("motor_overheat") & dones if has_oh
+                  else torch.zeros_like(dones))
+          if bar_c is not None:
+            clip_sum += torch.where(track, bar_term.clip_frac, 0.0)
+            clip_cnt += track.float()
         if calib:
           # step j = k - decision (1..Hc) of the real "u_SONIC, then pi"
           j = k - (on + k_off[epc])
@@ -977,6 +990,7 @@ class Evaluator:
               ep_tw_peak[e_] = torch.where(over[f_ids], tw_peak[f_ids].clamp_min(LIMIT_C),
                                            tw_peak[f_ids])
               ep_tw_start[e_] = tw_start[f_ids]
+              ep_clip[e_] = clip_sum[f_ids] / clip_cnt[f_ids].clamp_min(1.0)
         book.finish(oc["fell"], ep, False, k, on)
         book.finish(oc["up"], ep, True, k, on)
         self._finish(oc["up"])
@@ -997,6 +1011,11 @@ class Evaluator:
     if therm is not None:
       rec.update(overheated=ep_over.cpu(), tw_peak_c=ep_tw_peak.cpu(),
                  tw_start_max_c=ep_tw_start.cpu())
+      if bar_c is not None:
+        rec.update(cbf_clip_frac=ep_clip.cpu(), cbf_over_limit=(ep_tw_peak > bar_c).cpu())
+        print(f"[qcbf]   {label} {ctl.cond.name}: temperature barrier ({bar_c:g} C) clipped "
+              f"{float(ep_clip.mean()):.3f} of motor-steps; peak winding over it in "
+              f"{int((ep_tw_peak > bar_c).sum())}/{E} episodes", flush=True)
       print(f"[qcbf]   {label} {ctl.cond.name}: overheated {int(ep_over.sum())}/{E}, fell "
             f"(other causes) {int((~book.survived & ~ep_over).sum())}/{E}; hottest winding at "
             f"the spawn {float(ep_tw_start.mean()):.1f} C, peak {float(ep_tw_peak.mean()):.1f} C "

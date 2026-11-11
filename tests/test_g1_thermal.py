@@ -252,3 +252,135 @@ def test_cpu_rollout_heat_step_matches_the_env():
   st.step(0.005)
   for got, exp in zip(r.temps[(0, 0)], st.T):
     assert np.allclose(got, exp[0].double().numpy(), atol=1e-4)
+
+
+# --- the temperature barrier (*_thermal_cbf tasks) ----------------------------------
+
+def test_joint_torque_inverts_the_linkage_split():
+  g1_sysid = _sysid_or_skip()
+  th = g1_sysid.motor_thermal_cls().from_json(like=torch.zeros(1))
+  tau = torch.randn(7, 29) * 20.0
+  back = T.joint_torque(th, th.motor_torque(tau), g1_sysid.linkages())
+  assert torch.allclose(back, tau, atol=1e-5)
+
+
+def test_barrier_bound_meets_the_condition_with_equality():
+  env = _Env(n_envs=64)
+  st = T.thermal_state(env, T.ThermalCfg(start_level_c=(30.0, 70.0)))
+  w = torch.randn(64, 29) * 2.0
+  tau_bar, u_bar = T.barrier_bound(st, w, 70.0, 1.0)
+  f, g = st.th.affine_terms(st.T, w)
+  ok = u_bar > 0
+  # dTw/dt at the bound = gamma (70 - Tw): dh/dt = -gamma h, the barrier's edge
+  assert torch.allclose((f + g * tau_bar ** 2)[ok], (1.0 * (70.0 - st.Tw))[ok], atol=1e-4)
+  assert torch.equal(tau_bar[~ok], torch.zeros_like(tau_bar[~ok]))
+
+
+def _barrier_action(env, n_targets=29):
+  """A ThermalBarrierAction without mjlab's action manager: the attributes
+  safe_targets reads, targets in motor order (m2t = identity)."""
+  g1_sysid = _sysid_or_skip()
+  a = object.__new__(T.ThermalBarrierAction)
+  a.state = T.thermal_state(env, T.ThermalCfg(start_level_c=(30.0, 70.0)))
+  a.m2t = torch.arange(n_targets)
+  gen = torch.Generator().manual_seed(1)
+  a.kp = 15.0 + 85.0 * torch.rand(n_targets, generator=gen)
+  a.kd = 1.0 + 5.0 * torch.rand(n_targets, generator=gen)
+  a.limit_c, a.gamma, a.pairs = 70.0, 1.0, g1_sysid.linkages()
+  return a
+
+
+def _hot_case(env, a, n):
+  gen = torch.Generator().manual_seed(2)
+  Tw = 40.0 + 30.0 * torch.rand(n, 29, generator=gen)       # some motors near 70 C
+  a.state.set(None, Tw, Tw - 5.0, Tw - 5.0)
+  q = 0.3 * torch.randn(n, 29, generator=gen)
+  qd = 2.0 * torch.randn(n, 29, generator=gen)
+  target = q + 0.5 * torch.randn(n, 29, generator=gen)       # large PD torques
+  return target, q, qd
+
+
+def test_safe_targets_respect_every_motor_bound_and_touch_nothing_else():
+  env = _Env(n_envs=256)
+  a = _barrier_action(env)
+  target, q, qd = _hot_case(env, a, 256)
+  new, clipped, u_bar = a.safe_targets(target, q, qd)
+  assert clipped.any() and (~clipped).any()
+  th = a.state.th
+  tau_m = th.motor_torque(a.kp * (new - q) - a.kd * qd)
+  tau_bar, _ = T.barrier_bound(a.state, th.motor_speed(qd), 70.0, 1.0)
+  assert bool((tau_m.abs() <= tau_bar + 1e-3).all())
+  # a joint keeps its target unless its motor or its linkage partner was clipped
+  moved = clipped.clone()
+  for p, r in a.pairs.values():
+    moved[:, p] = moved[:, r] = clipped[:, p] | clipped[:, r]
+  assert torch.equal(new[~moved], target[~moved])
+  # a cold robot is never clipped
+  a.state.set(None, torch.full((256, 29), 35.0), torch.full((256, 29), 33.0),
+              torch.full((256, 29), 33.0))
+  new_c, clipped_c, _ = a.safe_targets(target, q, 0.0 * qd)
+  small = q + 0.01 * (target - q)
+  new_s, clipped_s, _ = a.safe_targets(small, q, 0.0 * qd)
+  assert not clipped_s.any() and torch.equal(new_s, small)
+
+
+def test_cpu_rollout_barrier_matches_the_env():
+  """cpu_rollout.Roller._barrier (numpy, MjData addressing) writes the same
+  joint targets as ThermalBarrierAction.safe_targets."""
+  g1_sysid = _sysid_or_skip()
+  sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "examples"))
+  import dataclasses
+
+  import cpu_rollout as cr
+  env = _Env(n_envs=8)
+  a = _barrier_action(env)
+  target, q, qd = _hot_case(env, a, 8)
+  want, clipped, _ = a.safe_targets(target, q, qd)
+  assert clipped.any()
+  th_np = g1_sysid.motor_thermal_cls().from_json(sim_heat_scale=True)
+  perm = np.random.default_rng(0).permutation(29)          # model actuator of motor i
+  dof = np.random.default_rng(1).permutation(29)           # model dof of motor i's joint
+  r = object.__new__(cr.Roller)
+  r.th = g1_sysid.motor_thermal_cls()(**{f.name: getattr(th_np, f.name)
+                                         for f in dataclasses.fields(th_np)})
+  r.s = SimpleNamespace(thermal=dict(
+    act=perm, vadr=6 + dof, dt=0.005,
+    barrier=dict(limit_c=70.0, gamma=1.0, kp=a.kp.double().numpy(), kd=a.kd.double().numpy(),
+                 qadr=7 + dof, pairs={k: tuple(v) for k, v in a.pairs.items()})))
+  for i in range(8):
+    r.temps = {(0, 0): tuple(x[i].double().numpy() for x in a.state.T)}
+    qpos, qvel = np.zeros(36), np.zeros(35)
+    qpos[7 + dof], qvel[6 + dof] = q[i].double().numpy(), qd[i].double().numpy()
+    c_nom = np.zeros(29)
+    c_nom[perm] = target[i].double().numpy()
+    d = SimpleNamespace(qpos=qpos, qvel=qvel, ctrl=c_nom.copy())
+    r._barrier(d, c_nom, (0, 0))
+    assert np.allclose(d.ctrl[perm], want[i].double().numpy(), atol=1e-4), i
+
+
+def test_thermal_cbf_tasks_register_the_decoupled_design():
+  _sysid_or_skip()
+  import robot_safety_sandbox  # noqa: F401  (registers on import)
+  from robot_safety_sandbox.envs.g1_stabilize.env_cfg import g_fall_noheight
+  from robot_safety_sandbox.registry import AVOID, spec
+  for tid, parent in (("g1_recover_thermal_cbf", "g1_recover_noheight"),
+                      ("g1_recover_lafan_thermal_cbf", "g1_recover_lafan_noheight")):
+    s, p = spec(tid), spec(parent)
+    assert s.mode == AVOID and s.margin_fn.avoid_margin is g_fall_noheight, tid
+    assert (s.ctrl_dim, s.dstb_dim, s.kwargs) == (p.ctrl_dim, p.dstb_dim, p.kwargs), tid
+  cfg = spec("g1_recover_thermal_cbf").cfg_builder()
+  th_cfg = spec("g1_recover_thermal").cfg_builder()
+  act = cfg.actions["joint_pos"]
+  assert isinstance(act, T.ThermalBarrierActionCfg)
+  assert (act.limit_c, act.gamma) == (70.0, 1.0) == (T.CBF_LIMIT_C, T.CBF_GAMMA)
+  assert act.thermal_cfg.start_level_c == (30.0, 70.0)
+  old = th_cfg.actions["joint_pos"]
+  assert act.scale == old.scale and act.actuator_names == old.actuator_names
+  assert "motor_overheat" not in cfg.terminations
+  assert set(cfg.terminations) == set(th_cfg.terminations) - {"motor_overheat"}
+  assert list(cfg.observations["actor"].terms) == list(th_cfg.observations["actor"].terms)
+  assert list(cfg.observations["critic"].terms) == list(th_cfg.observations["critic"].terms)
+  assert {"cbf_clip_frac", "cbf_negative_bound_frac", "cbf_overshoot_c",
+          "motor_temp_max"} <= set(cfg.metrics)
+  with pytest.raises(ValueError):
+    spec("g1_recover_thermal_cbf").cfg_builder(thermal_overheat_termination=True)

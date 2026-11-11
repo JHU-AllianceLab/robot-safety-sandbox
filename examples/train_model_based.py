@@ -146,10 +146,15 @@ def _record_thermal(env, outdir: str) -> None:
   import json
   from robot_safety_sandbox.envs.assets.g1_sysid import provenance
   info = dict(provenance(), thermal_cfg=dataclasses.asdict(thermal_state(env.mj).cfg))
+  bar = env.mj.action_manager.get_term("joint_pos")
+  info["barrier"] = ({"limit_c": bar.limit_c, "gamma": bar.gamma}
+                     if hasattr(bar, "safe_targets") else None)
+  info["overheat_termination"] = "motor_overheat" in env.mj.termination_manager.active_terms
   with open(os.path.join(outdir, "g1_sysid.json"), "w") as f:
     json.dump(info, f, indent=1)
   print(f"[thermal] identified G1 + heat model v{info['version']} ({info['sysid_dir']}); "
-        f"start draw {info['thermal_cfg']}")
+        f"start draw {info['thermal_cfg']}; barrier {info['barrier']}; overheat termination "
+        f"{info['overheat_termination']}")
 
 
 def main():
