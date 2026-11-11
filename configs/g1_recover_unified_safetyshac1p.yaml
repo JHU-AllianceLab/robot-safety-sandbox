@@ -1,0 +1,64 @@
+# THE UNIFIED G1 FALLBACK SETUP -- the SHAC arm (Zizhe + Yuanhong, agreed 2026-11-09/10).
+# Same task and env_overrides as the PPO arm, configs/g1_recover_unified_safetyppo1p.yaml,
+# whose header lists the agreed environment; the SHAC recipe is the thermal_cbf one
+# (configs/g1_recover_sonic_thermal_cbf_safetyshac1p.yaml), with the lr schedule stretched to
+# the 2.5 B budget.
+#
+#   python examples/train.py --config configs/g1_recover_unified_safetyshac1p.yaml \
+#       --seed 0 --out runs/g1_unified/shac_s0
+#
+# The world-model state is the critic group: 101-D + winding and housing temperatures = 159-D.
+#
+family: model_based      # SHAC family -- the train.py router reads this
+task: g1_recover_unified
+num_envs: 4096
+steps: 2500000000        # the agreed budget ceiling: 2.5 B env steps
+seed: 0
+
+# --- SHARED with the PPO arm (verbatim) ---------------------------------------
+env_overrides:
+  dataset: data/g1_sonic_push_gfall_sysid316_train_bank_net.pt
+  weights: {handover: 1.0, nominal: 0.0, clean: 0.0, pushed: 0.0, fell: 0.0,
+            synthetic: 0.0, mocap: 0.0}
+  sampler: uniform       # handover rows drawn uniformly; no level curriculum
+  episode_length_s: 3.0
+  rest_terminate: true
+  rest_dwell_s: 0.4
+  rest_arm_s: 0.8
+
+privileged_critic: true  # the world-model state AND the critic's input (159-D)
+gamma: 0.99
+gamma_anneal: false
+net: "512,256,128"
+action_rate_coef: 0.05   # value units here (PPO: inside its advantage-normalized loss)
+action_mag_coef: 0.005
+
+# --- SHAC recipe (SuperMimic's values unless noted) ---------------------------
+lr: 2.0e-4
+lr_decay_iters: 244141   # = the run's iterations: 2.5B / (4096 x 2.5)
+lr_min_frac: 0.03
+wm_warmup_iters: 1000    # ~10M env steps of model-only fitting first (the model
+                         # reached its plateau error by ~350 iterations on G1)
+actor_delay_iters: 200   # ~2M more: the critic's first fit before the actor moves
+horizon: 32
+imagine_batch: 4096
+action_noise_std: 0.1
+softmin_tau: 0.0
+wm_net: "1024,1024,1024" # paper 3x2048; 16 GB shared with mjlab
+wm_head_net: "256,256"
+wm_window: 8
+wm_batch: 2048
+wm_gradient_steps: 10
+critic_epochs: 5
+critic_minibatches: 4
+utd_ratio: 0.4
+learning_starts: 64
+replay_size: 500         # paper 1000 per env; ~1.5 GiB at 4096 envs and 159-D
+tf32: true               # the paper's precision; 1.18x faster here
+
+log_interval: 50
+checkpoint_every: 50000000
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false

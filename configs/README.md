@@ -78,6 +78,8 @@ experiment registry for the narrative of what was tried and why.
 | `g1_waist_stay_armrandom_safetyppo1p.yaml` | `on_policy` | `SafetyPPO1P` — G1 reach-avoid-stay, STAY half: upright and inside a waist roll/pitch + zero-velocity goal set, arms random (goal and arm magnitude curricula). Train first |
 | `g1_waist_reach_armrandom_reachavoidppo1p.yaml` | `on_policy` | `ReachAvoidPPO1P` — G1 reach-avoid-stay, REACH half: its target is the frozen stay twin's certified set (warm-starts from the stay run) |
 | `g1_recover_safetyshac1p.yaml` | `model_based` | `SafetySHAC1P` — the G1 recovery fallback through a learned world model (BPTT of the imagined safety value), on the spawn recipe of `g1_recover_safetyppo1p.yaml`; warm-starts actor and critic from the privileged-critic push run. No pushes: the trainer refuses tasks with in-episode disturbances |
+| `g1_recover_unified_safetyppo1p.yaml` | `on_policy` | **The default for new G1 fallback runs.** `SafetyPPO1P` on `g1_recover_unified`, the setup Zizhe and Yuanhong agreed on 2026-11-10: identified G1 (sysID v0.4.0, 7520-14 hip pitch) with its heat model and 70 C barrier, margin min(70° − tilt, joint clearance / 0.2), failure at 70° tilt only, actor 127-D, critic 101-D + temperatures, 2.5 B steps |
+| `g1_recover_unified_safetyshac1p.yaml` | `model_based` | The same unified setup with `SafetySHAC1P` (the thermal_cbf SHAC recipe, lr schedule over 2.5 B steps) |
 
 Add new recipes freely. Keep **canonical** recipes here (committed); keep ad-hoc
 sweeps / scratch experiments out of the repo (they belong with the private

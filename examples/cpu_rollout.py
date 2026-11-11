@@ -38,6 +38,8 @@ measures how well):
   height, tilt, every joint within its range + 0.1 rad, no non-foot contact,
   read as mjlab's termination reads it: the derived pose and contact
   sensors of the last substep, the joints current) with the task's joint scale;
+  or, on a ``*_unified`` task, ``unified.g_tilt_joint``: min(70 deg - tilt,
+  joint clearance in the range + 0.1 rad / 0.2), anchored at -0.1 past 70 deg;
 * SHAC's input: the actor group rebuilt from MjData term by term, noise-free
   by default; a NOISY check (``n_rollouts`` > 1 or ``noise=True``) runs R
   rollouts per robot, each reading it through the env's own sensor-noise law
@@ -117,9 +119,15 @@ class Spec:
   tilt_cos: float = math.cos(math.radians(50.0))
   force_threshold: float = 10.0
   clamp: float = 3.0
-  #: "fall" (compose(g_fall)) or "k" (K's margin, k_set.margin_from_terms)
+  #: "fall" (compose(g_fall)), "k" (K's margin, k_set.margin_from_terms) or
+  #: "tilt_joint" (the *_unified tasks' unified.g_tilt_joint)
   margin: str = "fall"
   k_joint_scale: float = 0.1
+  #: the tilt_joint margin: min(tilt_max - tilt, (joint clearance in the range
+  #: widened by joint_overshoot) / joint_scale)
+  tilt_max: float = math.radians(70.0)
+  joint_overshoot: float = 0.1
+  joint_scale: float = 0.2
   #: [n_joints, 2]: the joints' ranges in the actor's joint order (K's margin)
   joint_range: np.ndarray = None
   #: sensordata of every non-foot contact "found" sensor (K's margin)
@@ -193,9 +201,11 @@ def build_spec(env, actor_path: str, out_dir: str, margin: str = "auto",
   actor term, actuator or sensor it does not know how to rebuild.
 
   ``margin``: ``"fall"`` (compose(g_fall)), ``"k"`` (K's margin with joint
-  scale ``k_joint_scale``: default the task margin's own, else k_set's 0.1) or
+  scale ``k_joint_scale``: default the task margin's own, else k_set's 0.1),
+  ``"tilt_joint"`` (``unified.g_tilt_joint``, the *_unified tasks) or
   ``"auto"``: ``"k"`` when the env ends episodes on leaving K (a ``k_failure``
-  termination term)."""
+  termination term), ``"tilt_joint"`` when the task's margin is
+  ``g_tilt_joint``, else ``"fall"``."""
   from robot_safety_sandbox.envs.g1_stabilize.env_cfg import (
     CLAMP, CONTACT_FORCE_THRESHOLD, TILT_COS, Z_MIN, Z_SCALE)
   from robot_safety_sandbox.filters.rollout import dr_identity_fields
@@ -313,21 +323,25 @@ def build_spec(env, actor_path: str, out_dir: str, margin: str = "auto",
   fadr = _sensor_adr(m, "nonfoot_ground_touch_", "_force")
   if not fadr:
     raise SystemExit("[rollout] no nonfoot_ground_touch_*_force sensors in the model")
-  if margin == "auto":
-    margin = "k" if "k_failure" in getattr(mj.cfg, "terminations", {}) else "fall"
   hook = getattr(mj.cfg, "rewards", {}).get("zoo_safety_hook")
   avoid = getattr((getattr(hook, "params", None) or {}).get("margin_fn"), "avoid_margin", None)
+  tj = getattr(avoid, "tilt_joint", None)
+  if margin == "auto":
+    margin = ("k" if "k_failure" in getattr(mj.cfg, "terminations", {})
+              else "tilt_joint" if tj is not None else "fall")
   if k_joint_scale is None:
     # the task's K margin says its joint scale (k_set.g_k / push_bench.g_bench)
     k_joint_scale = getattr(avoid, "k_joint_scale", None)
   # g_fall_noheight (the *_noheight tasks) drops g_fall's pelvis-height term:
   # z_min = -inf makes that term +inf, so it never binds
   z_min = Z_MIN if getattr(avoid, "fall_height_term", True) else -math.inf
-  if margin not in ("fall", "k"):
-    raise SystemExit(f"[rollout] margin {margin!r}: fall | k | auto")
+  if margin not in ("fall", "k", "tilt_joint"):
+    raise SystemExit(f"[rollout] margin {margin!r}: fall | k | tilt_joint | auto")
+  if margin == "tilt_joint" and tj is None:
+    raise SystemExit("[rollout] margin tilt_joint: the task's margin is not unified.g_tilt_joint")
   t_margin = getattr(avoid, "thermal", None)
-  if therm is not None and margin != "fall":
-    raise SystemExit("[rollout] a motor thermal state needs the fall margin")
+  if therm is not None and margin == "k":
+    raise SystemExit("[rollout] a motor thermal state needs the fall or tilt_joint margin")
   if t_margin is not None:
     # the *_thermal tasks: the hottest winding in the margin, an overheat termination
     if therm is None:
@@ -341,6 +355,11 @@ def build_spec(env, actor_path: str, out_dir: str, margin: str = "auto",
     k_extra = dict(margin="k", k_joint_scale=float(0.1 if k_joint_scale is None else k_joint_scale),
                    joint_range=_np(robot.data.joint_pos_limits)[0].astype(np.float64),
                    nonfoot_found_adr=np.asarray(found))
+  elif margin == "tilt_joint":
+    k_extra = dict(margin="tilt_joint", tilt_max=float(tj["tilt_max"]),
+                   joint_overshoot=float(tj["joint_overshoot"]),
+                   joint_scale=float(tj["joint_scale"]),
+                   joint_range=_np(robot.data.joint_pos_limits)[0].astype(np.float64))
   if any(t[0] == "foot_contact" for t in terms):
     feet = [_sensor_adr(m, "feet_ground_contact_", f"{side}_ankle_roll_link_found")
             for side in ("left", "right")]
@@ -509,7 +528,7 @@ class Roller:
     c_nom = d.ctrl.copy() if barrier else None
     if s.margin == "k":
       if self.th is not None:
-        raise ValueError("a thermal rollout runs on the fall margin")
+        raise ValueError("a thermal rollout runs on the fall or tilt_joint margin")
       for _ in range(s.decimation):
         mujoco.mj_step(m, d)
       # mjlab reads its terminations, its margin and (sensor cache) the contact
@@ -528,7 +547,7 @@ class Roller:
         self._heat(d, (slot, r))
       f = d.sensordata[s.force_adr[:, None] + np.arange(3)]
       peak = max(peak, float(np.sqrt((f * f).sum(1)).max()))
-    g = self.margin(d, peak)
+    g = self.margin_tilt_joint(d) if s.margin == "tilt_joint" else self.margin(d, peak)
     if self.th is not None and "scale_c" in s.thermal:
       t = s.thermal
       hottest = float(self.temps[(slot, r)][0].max())
@@ -557,6 +576,21 @@ class Roller:
     if z < K_H_MIN or tilt > K_THETA_MAX or joint < 0.0 or nonfoot:
       return min(g, K_ANCHOR)
     return max(g, 0.0)
+
+  def margin_tilt_joint(self, d: mujoco.MjData) -> float:
+    """``unified.g_tilt_joint`` after a step, clamped, the failure (tilt past
+    ``tilt_max``, mjlab's ``fell_over``) anchored at -0.1 as the reward hook
+    does: the pose from qpos as :meth:`margin` reads it, the joints current."""
+    s = self.s
+    q = d.qpos[s.root_qadr:s.root_qadr + 7]
+    up = -_quat_rotate_inv(q[3:7], np.array([0.0, 0.0, -1.0]))[2]
+    tilt = math.acos(min(1.0, max(-1.0, float(up))))
+    jq = d.qpos[s.joint_qadr]
+    lo = s.joint_range[:, 0] - s.joint_overshoot
+    hi = s.joint_range[:, 1] + s.joint_overshoot
+    joint = float(np.minimum(jq - lo, hi - jq).min())
+    g = float(np.clip(min(s.tilt_max - tilt, joint / s.joint_scale), -s.clamp, s.clamp))
+    return min(g, K_ANCHOR) if tilt > s.tilt_max else g
 
   def margin(self, d: mujoco.MjData, peak_force: float) -> float:
     s = self.s

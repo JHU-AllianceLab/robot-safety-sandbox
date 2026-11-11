@@ -1,0 +1,73 @@
+# THE UNIFIED G1 FALLBACK SETUP -- the PPO arm (Zizhe + Yuanhong, agreed 2026-11-09/10).
+# The default for new G1 fallback runs; the SHAC arm is configs/g1_recover_unified_safetyshac1p.yaml
+# (same task, same env_overrides).
+#
+#   python examples/train.py --config configs/g1_recover_unified_safetyppo1p.yaml \
+#       --seed 0 --out runs/g1_unified/ppo_s0
+#
+# Needs the mjlab316 env (MuJoCo / Warp 3.16, mjlab main dcdf6ce5), the sysID repo at
+# $G1_SYSID_DIR (pinned to v0.4.0 in envs/assets/g1_sysid.py), safety_sb3 feat/supermimic.
+#
+# The task, g1_recover_unified (envs/g1_recover/unified.py):
+#   robot      the lab's identified G1 (G1-robot-model-with-SysID v0.4.0): dcmotor actuators,
+#              7520-14 on hip pitch (kp 40.2, 88 N m), measured ranges, sole capsules condim 3
+#              and every other geom condim 1, self-collision on
+#   physics    MuJoCo / Warp 3.16, 5 ms x decimation 4 = 50 Hz, iterations 10, line-search 20,
+#              CCD 50
+#   DR         foot friction U(0.3, 1.2), torso COM xy +-0.025 / z +-0.03 m, encoder bias
+#              +-0.015 rad; drawn once per env
+#   action     29-D, clamped +-3; target = default + scale * a - bias
+#   actor      98-D (gyro, gravity, q - default, qd, last action, 5 zero dims) + 29 winding
+#              temperatures = 127-D, uniform sensor noise
+#   critic     the 98 terms noise-free + pelvis linear velocity in the heading frame = 101-D,
+#              + winding and housing temperatures = 159-D (privileged_critic below)
+#   normalizer running mean / var, clip +-10, separate actor / critic
+#   failure    tilt > 70 deg only, once per control step; no non-foot-contact termination
+#   margin     g = clamp(min(70 deg - tilt, joint clearance / 0.2), -3, 3), tilt in rad,
+#              clearance inside each MJCF range widened by 0.1 rad; failure -> g <= -0.1
+#   thermal    heat model in the loop, a 70 C winding barrier below the policy (thermal_cbf)
+#
+# NOT agreed yet, kept from the thermal_cbf runs for now: the start bank and its sampler
+# (SONIC's pelvis-kick harvest on the identified G1, configs/sweeps/shac_thermal/data_jobs.txt;
+# the agreed push model, a force at one of 12 bodies, needs a re-harvest), the episode
+# length and the rest truncation, model selection and evaluation.
+#
+family: on_policy        # PPO family -- the train.py router reads this
+task: g1_recover_unified
+num_envs: 4096
+steps: 2500000000        # the agreed budget ceiling: 2.5 B env steps (~12,716 iterations)
+seed: 0
+
+# --- SHARED with the SHAC arm (verbatim) ---------------------------------------
+env_overrides:
+  dataset: data/g1_sonic_push_gfall_sysid316_train_bank_net.pt
+  weights: {handover: 1.0, nominal: 0.0, clean: 0.0, pushed: 0.0, fell: 0.0,
+            synthetic: 0.0, mocap: 0.0}
+  sampler: uniform       # handover rows drawn uniformly; no level curriculum
+  episode_length_s: 3.0
+  rest_terminate: true
+  rest_dwell_s: 0.4
+  rest_arm_s: 0.8
+
+privileged_critic: true  # the critic reads the 159-D critic group
+gamma: 0.99
+gamma_anneal: false
+net: "512,256,128"
+action_rate_coef: 0.05   # on the mean action, in the loss (not in g)
+action_mag_coef: 0.005
+
+# --- PPO recipe: 4096 x 48, 5 epochs x 4 minibatches, lambda 0.95, clip 0.2 -----
+n_steps: 48
+lr: 1.0e-4
+adaptive_lr: false       # constant; epochs stop early once approx KL > 1.5 x target_kl = 0.015
+target_kl: 0.01
+ent_coef: 1.0e-3
+vf_coef: 0.5
+max_std: 0.4             # std starts at 0.3
+critic_warmup_steps: 0
+
+checkpoint_every: 50000000
+video_interval: 100000000
+video_seconds: 20
+video_fps: 50
+video_wandb: false
