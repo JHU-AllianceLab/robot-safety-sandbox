@@ -91,7 +91,7 @@ def _git() -> dict:
     except (OSError, subprocess.SubprocessError):
       return None
   return {"branch": run("rev-parse", "--abbrev-ref", "HEAD"), "commit": run("rev-parse", "HEAD"),
-          "dirty": bool(run("status", "--porcelain"))}
+          "dirty": bool(run("status", "--porcelain", "--untracked-files=no"))}
 
 
 def _dump(obj, path: str) -> None:
