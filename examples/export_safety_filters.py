@@ -233,7 +233,6 @@ seed 0 of this repo:
 | `G1TP-Track-Walk4-WM-Hybrid` | `separate` | `thermal70/s0/` | `thermal70/s0/tubes/separate.json` |
 
 ```bash
-hf auth login                                  # this repo is private
 hf download {repo_id} --local-dir ~/g1-thermal-safety-filters
 export G1_FILTER_RELEASE=~/g1-thermal-safety-filters
 cd g1_safety_porl && git checkout wm-filter-walk4 && source scripts/wm_env.sh   # other paths: see the script
@@ -299,7 +298,7 @@ your command, rewards, terminations and policy observation groups, as
 from robot_safety_sandbox.filters.pretrained import download, load_pretrained_filter
 from robot_safety_sandbox.filtered_env import WMTubeFilteredEnv
 
-root = download("{repo_id}")          # private repo: huggingface-cli login first
+root = download("{repo_id}")          # a private copy needs `hf auth login` first
 env.reset()
 filt, bundle = load_pretrained_filter(
     env, root, "separate", seed=0,           # "joint" | "fall_only_cbf" | "separate"
@@ -324,6 +323,9 @@ coverage probe of the bound.
 * The world model's state is privileged (true joint state, foot contacts,
   temperatures): this is a simulation filter.
 * `fall_only_cbf` only works in the barrier world: the clip is part of the env.
+* Provenance: trained in simulation only. The fallbacks' start states were
+  harvested from GEAR-SONIC tracking G1-retargeted LAFAN1 clips (LAFAN1 is
+  CC BY-NC-ND 4.0); no motion data or SONIC weights are in this repo.
 """
 
 
