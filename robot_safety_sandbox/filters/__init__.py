@@ -34,6 +34,14 @@ monitor to a full adversarial rollout swaps exactly one of the three modules.
 That is the whole point of the decomposition, and it is load-bearing — if a new
 monitor ever needs the intervention edited, the interface is wrong.
 
+A sixth triple, with its own monitor AND intervention, lives in wm_tube.py:
+
+  wm_tube_filter         PolicyFallback + WMTubeMonitor +
+                         DwellSwitchIntervention — the eval's world-model tube
+                         filter (``wmmin:<s>:<c>[+dwell<s>]``) at train time:
+                         one rollout in the fallback's own world model, a
+                         conformal eps, and a strict switch with a hold.
+
 One composition sits a level above the triples: :class:`~.switch.
 ReachAvoidStayFilter` holds TWO of them — a reach-avoid filter and an avoid
 filter on the stay constraint — and a latched per-env mode between them,
@@ -71,6 +79,10 @@ from .monitor import (
 from .rollout import MjlabShadowSim, RolloutStep, ShadowSim, sync_env_state
 from .switch import ReachAvoidStayFilter
 from .telemetry import EngagementLog, FilterInfo
+from .wm_tube import (
+  DwellSwitchIntervention, WMTubeBundle, WMTubeCondition, WMTubeMonitor,
+  check_binding, fallback_layout, load_wm_tube, matmul_precision,
+  parse_wm_condition, preserve_rng, thermal_world_info, wm_tube_filter)
 
 __all__ = [
   "SafetyFilter", "FilterInfo", "EngagementLog",
@@ -84,6 +96,9 @@ __all__ = [
   "safety_value_filter", "safety_critic_filter", "qcbf_filter",
   "rollout_filter", "gameplay_filter",
   "ReachAvoidStayFilter",
+  "WMTubeMonitor", "DwellSwitchIntervention", "WMTubeBundle", "WMTubeCondition",
+  "wm_tube_filter", "load_wm_tube", "check_binding", "fallback_layout",
+  "thermal_world_info", "parse_wm_condition", "matmul_precision", "preserve_rng",
 ]
 
 

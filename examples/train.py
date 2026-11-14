@@ -5,6 +5,7 @@ The RL families are PEERS, not a main + variants:
     --family on_policy   -> train_on_policy.py    (A = PPO: {Safety,ReachAvoid}PPO{1P,2P})
     --family off_policy  -> train_off_policy.py   (A = SAC: {Safety,ReachAvoid}SAC{1P,2P})
     --family model_based -> train_model_based.py  (A = SHAC: {Safety,ReachAvoid,Cumulative}SHAC1P)
+    --family track       -> train_track_filtered.py (PPO + AMP squat tracking, in a WM-tube filter)
 
 The family is the MAP's **A**; the task's mode gives **M** and --adversary gives
 **P** (see robot_safety_sandbox/registry.py).
@@ -31,10 +32,12 @@ _FAMILIES = {
   "on_policy": "train_on_policy.py",    # PPO family
   "off_policy": "train_off_policy.py",  # SAC family
   "model_based": "train_model_based.py",  # SHAC through a learned world model
+  # the squat-tracking task policy (PPO + AMP), bare or inside a WM-tube filter
+  "track": "train_track_filtered.py",
 }
 _ALIASES = {"on": "on_policy", "ppo": "on_policy",
             "off": "off_policy", "sac": "off_policy",
-            "mb": "model_based", "shac": "model_based"}
+            "mb": "model_based", "shac": "model_based", "amp": "track"}
 
 
 def _family_from_config(path):

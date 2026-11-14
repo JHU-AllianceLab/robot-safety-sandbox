@@ -55,6 +55,10 @@ MARGIN AND TERMINATION (``*_thermal`` tasks). ``g_thermal = (LIMIT_C - max
 Tw) / SCALE_C``: 1 at 75 C, 0 at the limit, so it competes with the fall terms
 (tilt, non-foot contact; both 1 when comfortably safe) only in the last ~10 C.
 ``motor_overheat`` ends the episode, as a failure, once ``max Tw >= LIMIT_C``.
+The ``*_thermal70`` tasks (2026-11-11) are the same design at the barrier's
+limit, ``LIMIT70_C`` = 70 C (margin and termination; start levels U(30, 70)),
+so the two ways of holding 70 C -- learned through the margin, or a barrier
+below the policy -- compare like for like.
 
 THE TEMPERATURE BARRIER (``*_thermal_cbf`` tasks, :class:`ThermalBarrierAction`;
 the user's design, 2026-11-10). Thermal safety becomes a layer BELOW whatever
@@ -93,6 +97,8 @@ CBF_LIMIT_C = 70.0
 CBF_GAMMA = 1.0
 #: margin scale, C: g_thermal = 1 at LIMIT_C - SCALE_C
 SCALE_C = 10.0
+#: the margin / termination limit of the *_thermal70 tasks, C: the barrier's limit
+LIMIT70_C = CBF_LIMIT_C
 #: attribute of the mjlab env that holds its MotorThermalState
 _KEY = "_zoo_motor_thermal"
 
@@ -243,9 +249,9 @@ def motor_overheat(env, limit_c: float = LIMIT_C,
   return thermal_state(env, thermal_cfg).Tw.amax(dim=1) >= float(limit_c)
 
 
-def g_thermal(env) -> torch.Tensor:
-  """Thermal margin ``(LIMIT_C - max winding) / SCALE_C``; < 0 == over the limit."""
-  return (LIMIT_C - thermal_state(env).Tw.amax(dim=1)) / SCALE_C
+def g_thermal(env, limit_c: float = LIMIT_C) -> torch.Tensor:
+  """Thermal margin ``(limit_c - max winding) / SCALE_C``; < 0 == over the limit."""
+  return (float(limit_c) - thermal_state(env).Tw.amax(dim=1)) / SCALE_C
 
 
 def g_fall_noheight_thermal(env) -> torch.Tensor:
@@ -258,6 +264,17 @@ def g_fall_noheight_thermal(env) -> torch.Tensor:
 g_fall_noheight_thermal.fall_height_term = False
 #: what a CPU rollout must add to the fall margin (cpu_rollout.build_spec)
 g_fall_noheight_thermal.thermal = dict(limit_c=LIMIT_C, scale_c=SCALE_C)
+
+
+def g_fall_noheight_thermal70(env) -> torch.Tensor:
+  """:func:`g_fall_noheight_thermal` with the limit at ``LIMIT70_C`` = 70 C:
+  the margin of the ``*_thermal70`` tasks."""
+  from robot_safety_sandbox.envs.g1_stabilize.env_cfg import g_fall_noheight
+  return torch.minimum(g_fall_noheight(env), g_thermal(env, LIMIT70_C))
+
+
+g_fall_noheight_thermal70.fall_height_term = False
+g_fall_noheight_thermal70.thermal = dict(limit_c=LIMIT70_C, scale_c=SCALE_C)
 
 
 # --- the temperature barrier (*_thermal_cbf tasks) ---------------------------------

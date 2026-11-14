@@ -150,11 +150,19 @@ def _record_thermal(env, outdir: str) -> None:
   info["barrier"] = ({"limit_c": bar.limit_c, "gamma": bar.gamma}
                      if hasattr(bar, "safe_targets") else None)
   info["overheat_termination"] = "motor_overheat" in env.mj.termination_manager.active_terms
+  info["overheat_c"] = (float(env.mj.termination_manager.get_term_cfg("motor_overheat")
+                              .params["limit_c"]) if info["overheat_termination"] else None)
+  # the margin's thermal term, as the CPU rollout reads it (None: temperature not in it)
+  hook = getattr(env.mj.cfg, "rewards", {}).get("zoo_safety_hook")
+  avoid = getattr((getattr(hook, "params", None) or {}).get("margin_fn"), "avoid_margin", None)
+  info["margin_thermal"] = getattr(avoid, "thermal", None)
   with open(os.path.join(outdir, "g1_sysid.json"), "w") as f:
     json.dump(info, f, indent=1)
   print(f"[thermal] identified G1 + heat model v{info['version']} ({info['sysid_dir']}); "
         f"start draw {info['thermal_cfg']}; barrier {info['barrier']}; overheat termination "
-        f"{info['overheat_termination']}")
+        f"{info['overheat_termination']}"
+        + (f" at {info['overheat_c']:g} C" if info["overheat_c"] is not None else "")
+        + f"; margin thermal term {info['margin_thermal']}")
 
 
 def main():

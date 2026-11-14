@@ -1,0 +1,9 @@
+# Squat tracking, PILOT: the 6 arms at the pilot seed (2: the cbf seed-0 tube is the outlier),
+# 1e+09 steps each. After smoke.sh passes:
+#   sbatch -A hhu49_alliance1 -p rtx6000,h100,h200,a100,l40s --array=1-6 --gres=gpu:1 --cpus-per-task=8 --mem=64G --time=36:00:00 --job-name=track_pilot --output=logs/slurm/%x_%A_%a.out examples/slurm_jobs.sbatch configs/sweeps/track_squat/pilot_jobs.txt
+configs/sweeps/track_squat/quiet.sh python examples/train.py --config configs/g1_track_squat_ampppo.yaml --arm t70_bare --seed 2 --stage pilot --steps 1000000000 --out runs/track_squat/pilot/t70_bare/s2
+configs/sweeps/track_squat/quiet.sh python examples/train.py --config configs/g1_track_squat_ampppo.yaml --arm t70_wm_d0 --seed 2 --stage pilot --steps 1000000000 --out runs/track_squat/pilot/t70_wm_d0/s2
+configs/sweeps/track_squat/quiet.sh python examples/train.py --config configs/g1_track_squat_ampppo.yaml --arm t70_wm_d1 --seed 2 --stage pilot --steps 1000000000 --out runs/track_squat/pilot/t70_wm_d1/s2
+configs/sweeps/track_squat/quiet.sh python examples/train.py --config configs/g1_track_squat_ampppo.yaml --arm cbf_bare --seed 2 --stage pilot --steps 1000000000 --out runs/track_squat/pilot/cbf_bare/s2
+configs/sweeps/track_squat/quiet.sh python examples/train.py --config configs/g1_track_squat_ampppo.yaml --arm cbf_wm_d0 --seed 2 --stage pilot --steps 1000000000 --out runs/track_squat/pilot/cbf_wm_d0/s2
+configs/sweeps/track_squat/quiet.sh python examples/train.py --config configs/g1_track_squat_ampppo.yaml --arm cbf_wm_d1 --seed 2 --stage pilot --steps 1000000000 --out runs/track_squat/pilot/cbf_wm_d1/s2

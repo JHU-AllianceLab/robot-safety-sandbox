@@ -276,6 +276,17 @@ def _parse(argv=None):
                  help="wmcalib: steps of the recorded prediction and real margins")
   p.add_argument("--calib-max-delay-s", type=float, default=1.0,
                  help="wmcalib: the decision step ~ U{0 .. this} after the onset")
+  p.add_argument("--wm-thermal", choices=("nn", "hybrid", "hybrid-temps"), default="nn",
+                 help="the world-model conditions (wm*) on a *_thermal70 task: nn = the learned "
+                      "model as trained; hybrid = temperatures and the thermal margin from the "
+                      "sysID heat model, the fall margin from the learned head "
+                      "(filters/hybrid_thermal.py); hybrid-temps = the analytic temperatures "
+                      "under the head's own margin")
+  p.add_argument("--wm-cold-c", type=float, default=50.0,
+                 help="--wm-thermal hybrid: the hottest winding the head's fall margin is read at")
+  p.add_argument("--thermal-diag", action="store_true",
+                 help="with --wm-thermal hybrid*: every control step, the heat model's one-step "
+                      "prediction from the TRUE states vs the simulator's temperatures")
   p.add_argument("--exclude-categories", nargs="+", default=[], metavar="NAME",
                  help="draw no episode from these clip categories (e.g. fallAndGetUp sprint)")
   p.add_argument("--no-obs-noise", action="store_true",
@@ -476,6 +487,10 @@ class Evaluator:
     self.pi_slice, self.pi_obs_dim = (self._last_action_slice() if args.pi_obs_clamp == "box"
                                       else (None, None))
     self.pool = None
+    #: --wm-thermal hybrid*: the analytic half of the world model (setup_world_model)
+    self.hyb = None
+    #: the critic group's winding temperatures (calibration records the predicted hottest)
+    self.wm_tw_sl = None
     #: the last control step, for on_step hooks (filter_video.py): the tracked
     #: envs ``ids``, the verdict before any latch (None without one), whether
     #: pi acted, and after the step the margin g of every env
@@ -541,9 +556,16 @@ class Evaluator:
       print(f"[qcbf] the critic group has no 1-D pelvis_height / 3-D projected_gravity "
             f"({sorted(layout)}): wmcalib records no margin states", flush=True)
       self.wm_state_sl = None
+    if "motor_temp" in layout:
+      self.wm_tw_sl = slice(layout["motor_temp"][0], layout["motor_temp"][0] + layout["motor_temp"][1])
+    if self.a.wm_thermal != "nn":
+      from robot_safety_sandbox.filters.hybrid_thermal import AnalyticThermal
+      self.hyb = AnalyticThermal(self.env, wm, self.a.wm_thermal, cold_c=self.a.wm_cold_c)
+      print(f"[qcbf] world model: HYBRID thermal ({self.hyb.meta()})", flush=True)
     return {"state": f"critic group ({wm.state_dim}-D, true)", "context_dim": int(wm.context_dim),
             "z_clip": self.wm_z_clip, "pi_input": "rebuilt from the predicted state, noise-free",
-            "verdict": "min predicted g >= 0 and P(terminated) <= 0.5 over the horizon"}
+            "verdict": "min predicted g >= 0 and P(terminated) <= 0.5 over the horizon",
+            "thermal": self.hyb.meta() if self.hyb is not None else {"mode": "nn"}}
 
   def margin_states(self, s: torch.Tensor) -> torch.Tensor:
     """Pelvis height (m) and tilt from vertical (deg) of critic states ``s``
@@ -556,7 +578,8 @@ class Evaluator:
 
   @torch.no_grad()
   def wm_margins(self, ids: torch.Tensor, a_first: torch.Tensor, horizon: int,
-                 n_rollouts: Optional[int] = None, states: bool = False):
+                 n_rollouts: Optional[int] = None, states: bool = False,
+                 tw_out: Optional[list] = None):
     """The world model's predicted margins for envs ``ids``, ``[n, R, horizon]``:
     ``a_first`` for one model step, then pi on the predicted state. Step j's
     value is the predicted g, pushed to <= -0.1 once the predicted
@@ -565,7 +588,11 @@ class Evaluator:
     through the sensor-noise law (a fresh draw per rollout and step, as SHAC's
     imagination draws it); None: one noise-free rollout. ``states``: also
     return the decoded state's pelvis height and tilt after each step,
-    ``[n, R, horizon, 2]`` (:meth:`margin_states`)."""
+    ``[n, R, horizon, 2]`` (:meth:`margin_states`). ``tw_out``: a list the
+    predicted hottest winding after each step, ``[n, R, horizon]``, is appended
+    to (None without temperatures in the state). With ``--wm-thermal hybrid*``
+    the temperatures and (hybrid) the thermal margin come from the heat model
+    (``filters/hybrid_thermal.py``)."""
     wm, policy = self.model.world_model, self.model.policy
     R = 1 if n_rollouts is None else int(n_rollouts)
     noisy = n_rollouts is not None and self.model._noise_lo_t is not None
@@ -584,12 +611,25 @@ class Evaluator:
            if states and self.wm_state_sl is not None else None)
     act = a_first
     lo, hi = self.model._noise_lo_t, self.model._noise_hi_t
+    hyb = self.hyb
+    if hyb is not None:
+      T, hctx = hyb.start(ids, R)
+      s_cur = s
+    tws = (torch.full((int(s.shape[0]), horizon), math.nan, device=self.dev)
+           if tw_out is not None and self.wm_tw_sl is not None else None)
     for t in range(horizon):
       st = wm.step(z, act, cn, z_clip=self.wm_z_clip)
-      z = st.z_next
-      alive = alive * (1.0 - torch.sigmoid(st.done_logit))
-      out[:, t] = torch.where(alive < 0.5, torch.clamp_max(st.g, -0.1), st.g)
-      dec = wm.decode(z) if (sts is not None or t + 1 < horizon) else None
+      if hyb is not None:
+        T, s_cur, g, done_logit = hyb.model_step(T, hctx, s_cur, st, act.float(), cn)
+        z = wm.encode(s_cur)
+      else:
+        z, g, done_logit = st.z_next, st.g, st.done_logit
+      alive = alive * (1.0 - torch.sigmoid(done_logit))
+      out[:, t] = torch.where(alive < 0.5, torch.clamp_max(g, -0.1), g)
+      need = sts is not None or tws is not None or t + 1 < horizon
+      dec = (s_cur if hyb is not None else wm.decode(z)) if need else None
+      if tws is not None:
+        tws[:, t] = dec[:, self.wm_tw_sl].amax(1)
       if sts is not None:
         sts[:, t] = self.margin_states(dec)
       if t + 1 < horizon:
@@ -598,6 +638,8 @@ class Evaluator:
           o = o + lo + (hi - lo) * torch.rand_like(o)
         o, _bound = self._pi_obs(o)
         act = torch.clamp(policy._predict(self.norm(o), deterministic=True), self.low, self.high)
+    if tw_out is not None:
+      tw_out.append(None if tws is None else tws.view(-1, R, horizon))
     if states:
       return out.view(-1, R, horizon), (None if sts is None else sts.view(-1, R, horizon, 2))
     return out.view(-1, R, horizon)
@@ -799,7 +841,7 @@ class Evaluator:
         c_real_st = torch.full((E, Hc, 2), math.nan, device=dev)
     # *_thermal tasks: per episode, did the overheat termination end it, and the
     # hottest winding at the spawn and over the episode (before its last step;
-    # >= LIMIT_C when it overheated)
+    # >= the termination's limit when it overheated)
     therm = thermal_state(mj) if has_thermal(mj) else None
     # *_thermal_cbf tasks: the temperature barrier below every controller -- per
     # episode, the mean share of motors it clipped and whether the hottest
@@ -807,11 +849,28 @@ class Evaluator:
     bar_term = mj.action_manager.get_term("joint_pos") if therm is not None else None
     bar_c = getattr(bar_term, "limit_c", None)
     has_oh = therm is not None and "motor_overheat" in mj.termination_manager.active_terms
+    # the overheat termination's limit (85 C on *_thermal, 70 C on *_thermal70)
+    oh_c = (float(mj.termination_manager.get_term_cfg("motor_overheat").params["limit_c"])
+            if has_oh else LIMIT_C)
     if therm is not None:
       ep_over = torch.zeros(E, dtype=torch.bool, device=dev)
       ep_tw_peak = torch.full((E,), math.nan, device=dev)
       ep_tw_start = torch.full((E,), math.nan, device=dev)
       ep_clip = torch.full((E,), math.nan, device=dev)
+    # wmcalib on a thermal task: the predicted and the real hottest winding after each
+    # step j (real: NaN from the step that ended the episode on)
+    rec_tw = calib and therm is not None and self.wm_tw_sl is not None
+    if rec_tw:
+      c_pred_tw = torch.full((E, ctl.cond.n_rollouts or 1, Hc), math.nan, device=dev)
+      c_real_tw = torch.full((E, Hc), math.nan, device=dev)
+    # --thermal-diag: the heat model's one-step prediction from the TRUE states
+    diag = bool(a.thermal_diag) and self.hyb is not None and therm is not None
+    if diag:
+      K = len(therm.names)
+      dg = {k: torch.zeros(K, dtype=torch.float64, device=dev)
+            for k in ("n", "true_dTw", "pred_dTw", "abs_err_dTw", "abs_true_dTw",
+                      "true_dTh", "pred_dTh", "abs_err_dTh")}
+      dg_hot = {"n": 0, "abs_err": 0.0, "max_abs_err": 0.0}
     waves = (E + n - 1) // n
     for w, w0 in enumerate(range(0, E, n)):
       w1 = min(E, w0 + n)
@@ -877,13 +936,16 @@ class Evaluator:
           now = k[ids] == k_dec
           if bool(now.any()):
             d_ids = ids[now]
+            tw_l = [] if rec_tw else None
             if rec_states:
               m_p, s_p = self.wm_margins(d_ids, a_nom[d_ids].float(), Hc, ctl.cond.n_rollouts,
-                                         states=True)
+                                         states=True, tw_out=tw_l)
               c_pred[ep[d_ids]], c_pred_st[ep[d_ids]] = m_p, s_p
             else:
               c_pred[ep[d_ids]] = self.wm_margins(d_ids, a_nom[d_ids].float(), Hc,
-                                                  ctl.cond.n_rollouts)
+                                                  ctl.cond.n_rollouts, tw_out=tw_l)
+            if rec_tw and tw_l[0] is not None:
+              c_pred_tw[ep[d_ids]] = tw_l[0]
           # SONIC up to and at the decision step, pi from the next one
           verdict = torch.where(k[ids] > k_dec, -1.0, 1.0).float()
         elif kind == "wmtube":
@@ -933,10 +995,38 @@ class Evaluator:
         book.step(ids, (k[ids] >= split[ids]).long(), tel, jerr, jerr_bad, k[ids] - on[ids])
         if applied:
           record_applied_action(tr, act, mask=track)
+        if diag:
+          d_s0 = torch.nan_to_num(self.mj.observation_manager.compute_group(
+            "critic", update_history=False).float())[ids]
+          d_T0, d_ctx = self.hyb.start(ids)
+          d_a = act[ids].float()
         # --- the step, then the kick, then SONIC's clock
         obs, _g, dones, timeouts, _l = self.env.step_tensor(act)
         self.trace["g"] = _g
         k += 1
+        if diag:
+          d_live = ~dones[ids]
+          if bool(d_live.any()):
+            d_s1 = torch.nan_to_num(self.mj.observation_manager.compute_group(
+              "critic", update_history=False).float())[ids]
+            d_T1 = self.hyb.advance(d_T0, d_ctx, d_s0, d_s1, d_a)
+            lv = d_live.nonzero(as_tuple=False).squeeze(-1)
+            tw_true = therm.Tw[ids][lv].double()
+            th_true = therm.Th[ids][lv].double()
+            dtw_t, dtw_p = tw_true - d_T0[0][lv].double(), d_T1[0][lv].double() - d_T0[0][lv].double()
+            dth_t, dth_p = th_true - d_T0[1][lv].double(), d_T1[1][lv].double() - d_T0[1][lv].double()
+            dg["n"] += float(lv.numel())
+            dg["true_dTw"] += dtw_t.sum(0)
+            dg["pred_dTw"] += dtw_p.sum(0)
+            dg["abs_err_dTw"] += (dtw_p - dtw_t).abs().sum(0)
+            dg["abs_true_dTw"] += dtw_t.abs().sum(0)
+            dg["true_dTh"] += dth_t.sum(0)
+            dg["pred_dTh"] += dth_p.sum(0)
+            dg["abs_err_dTh"] += (dth_p - dth_t).abs().sum(0)
+            e_hot = (d_T1[0][lv].double().amax(1) - tw_true.amax(1)).abs()
+            dg_hot["n"] += int(lv.numel())
+            dg_hot["abs_err"] += float(e_hot.sum())
+            dg_hot["max_abs_err"] = max(dg_hot["max_abs_err"], float(e_hot.max()))
         if therm is not None:
           # a done env has respawned with new temperatures: keep its pre-step peak
           tw_peak = torch.where(dones, tw_peak, torch.maximum(tw_peak, therm.Tw.amax(1)))
@@ -958,6 +1048,9 @@ class Evaluator:
               cs = torch.nan_to_num(self.mj.observation_manager.compute_group(
                 "critic", update_history=False).float())[l_ids]
               c_real_st[ep[l_ids], (j[l_ids] - 1)] = self.margin_states(cs)
+            if rec_tw and bool(live.any()):
+              l_ids = live.nonzero(as_tuple=False).squeeze(-1)
+              c_real_tw[ep[l_ids], (j[l_ids] - 1)] = therm.Tw[l_ids].amax(1).float()
         if push:
           due = track & ~dones & (k == on)
           if bool(due.any()):
@@ -987,7 +1080,7 @@ class Evaluator:
             if f_ids.numel():
               e_ = ep[f_ids]
               ep_over[e_] = over[f_ids]
-              ep_tw_peak[e_] = torch.where(over[f_ids], tw_peak[f_ids].clamp_min(LIMIT_C),
+              ep_tw_peak[e_] = torch.where(over[f_ids], tw_peak[f_ids].clamp_min(oh_c),
                                            tw_peak[f_ids])
               ep_tw_start[e_] = tw_start[f_ids]
               ep_clip[e_] = clip_sum[f_ids] / clip_cnt[f_ids].clamp_min(1.0)
@@ -1025,11 +1118,35 @@ class Evaluator:
       if rec_states:
         rec.update(calib_pred_states=c_pred_st.cpu(), calib_real_states=c_real_st.cpu(),
                    calib_state_names=["pelvis_height_m", "tilt_deg"])
+      if rec_tw:
+        rec.update(calib_pred_tw=c_pred_tw.cpu(), calib_real_tw=c_real_tw.cpu())
     rec["_run"] = {"wall_s": time.time() - t0, "loop_steps": loop,
                    "tracked_env_steps": env_steps, "env_steps": loop * n,
                    "env_steps_per_s": loop * n / max(time.time() - t0, 1e-6),
                    # the share of pi's tracked steps whose last action left the box
                    "pi_obs_clamped": (pi_clamped / pi_steps) if pi_steps else None}
+    if diag and dg_hot["n"]:
+      nn_ = dg["n"].clamp_min(1.0)
+      names = list(therm.names)
+      per = {nm: {"true_dTw_C_per_step": float(dg["true_dTw"][i] / nn_[i]),
+                  "pred_over_true_dTw": (float(dg["pred_dTw"][i] / dg["true_dTw"][i])
+                                         if float(dg["true_dTw"][i]) != 0.0 else None),
+                  "rel_abs_err_dTw": (float(dg["abs_err_dTw"][i] / dg["abs_true_dTw"][i])
+                                      if float(dg["abs_true_dTw"][i]) > 0.0 else None)}
+             for i, nm in enumerate(names)}
+      td = {"motor_steps": float(dg["n"].sum()),
+            "pred_over_true_dTw": float(dg["pred_dTw"].sum() / dg["true_dTw"].sum()),
+            "rel_abs_err_dTw": float(dg["abs_err_dTw"].sum() / dg["abs_true_dTw"].sum()),
+            "pred_over_true_dTh": float(dg["pred_dTh"].sum() / dg["true_dTh"].sum())
+            if float(dg["true_dTh"].sum()) != 0.0 else None,
+            "hottest_abs_err_C_mean": dg_hot["abs_err"] / dg_hot["n"],
+            "hottest_abs_err_C_max": dg_hot["max_abs_err"], "per_motor": per}
+      rec["_run"]["thermal_diag"] = td
+      print(f"[qcbf]   {label} {ctl.cond.name}: heat model from the TRUE states, one step: "
+            f"predicted / true winding heating {td['pred_over_true_dTw']:.4f}, relative abs "
+            f"error {td['rel_abs_err_dTw']:.4f}; hottest winding error mean "
+            f"{td['hottest_abs_err_C_mean']:.2e} C, max {td['hottest_abs_err_C_max']:.2e} C",
+            flush=True)
     if horizon:
       rec["_run"].update(rollout_horizon_steps=horizon, rollouts=rollouts, rollout_wall_s=rollout_s,
                          rollout_ms_per_step=1e3 * rollout_s / max(loop, 1))
@@ -1329,6 +1446,9 @@ def main(argv=None):
     if ev.tube_calib.get("tag") != a.tag:
       raise SystemExit(f"[qcbf] {a.tube_calib} was calibrated for {ev.tube_calib.get('tag')!r}, "
                        f"not {a.tag!r}")
+    if ev.tube_calib.get("wm_thermal", "nn") != a.wm_thermal:
+      raise SystemExit(f"[qcbf] {a.tube_calib} was calibrated with --wm-thermal "
+                       f"{ev.tube_calib.get('wm_thermal', 'nn')}, not {a.wm_thermal}")
     wm_meta = dict(wm_meta, tube_calib=os.path.abspath(a.tube_calib))
   meta = {"source": "eval_sonic_qcbf.py", "policy": os.path.abspath(a.policy), "tag": a.tag,
           "task": a.task, "hip": a.hip, "library": os.path.abspath(a.library),

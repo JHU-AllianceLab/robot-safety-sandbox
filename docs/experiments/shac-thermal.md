@@ -11,18 +11,23 @@ the decisions behind each change, the commands, and the checks that have run.
 > temperature barrier (a CBF) BELOW every controller, clipping each motor's
 > torque so its winding stays below **70 °C**; temperature is out of the
 > margin and there is no overheat termination (tasks `*_thermal_cbf`,
-> `configs/sweeps/shac_thermal_cbf`). The 85 °C-margin design of §3–§6 is
-> kept in the code (tasks `*_thermal`) but its runs were cancelled.
+> `configs/sweeps/shac_thermal_cbf`). Its comparison arm (§11) keeps the
+> limit in the margin, at the same 70 °C (tasks `*_thermal70`). The 85 °C
+> design of §3–§6 stays in the code (tasks `*_thermal`); its runs were
+> cancelled.
 
-**Status (2026-11-10).** The 85 °C-margin design (§3–§6) passed its smoke
-test (job 1768194) and trained until it was cancelled (array 1768777; its
-seeds had also restarted from scratch after node failures). The barrier
-design (§10) is implemented, unit-tested (33 tests) and passed its smoke
-test (job 1785986); its 3-seed training (array 1786551) and report (array
-1786552, `aftercorr`) are submitted.
-Everything up to the redesign is committed on `feat/shac-thermal-mjc316`
-(§1); the cluster has no GitHub credentials, so push it from a terminal that
-does.
+**Status (2026-11-11).** Two arms, both at 70 °C. (1) The barrier (§10):
+smoke test passed (job 1785986); 3-seed training (array 1786551) and report
+(array 1786552, `aftercorr`) running. (2) The margin (§11): unit-tested (35
+tests with `test_g1_margins.py`); smoke 1792573 → training array 1792574
+(`afterok` on the smoke) → report array 1792576 (`aftercorr`) →
+`runs/shac_thermal70/wmreport/report.{json,log}`. The 85 °C design (§3–§6)
+passed its smoke test (job 1768194) and trained until it was cancelled on
+2026-11-10 (array 1768777; partial runs in
+`runs/shac_thermal/cancelled_20261110/`); a relaunch on 2026-11-11 (1792519–21)
+was cancelled within minutes in favour of the 70 °C arm.
+Everything up to §10 is committed on `feat/shac-thermal-mjc316` (§1); the
+cluster has no GitHub credentials, so push it from a terminal that does.
 
 ## 1. Software stack: a new branch and a new conda env
 
@@ -321,3 +326,37 @@ equal. On 64 kicked episodes the barrier clipped 1.7 % of SONIC's motor-steps
 (0.1 % of the 3M-step smoke policy's); the hottest winding peaked at 69.6 °C at
 most and no episode of any condition went over 70 °C. SONIC alone survived
 53.1 %. Start temperatures were identical across conditions and all ≤ 70 °C.
+
+## 11. The comparison arm (2026-11-11): the 70 °C limit in the margin
+
+The barrier arm (§10) and the 85 °C design (§3–§6) differed in two things, the
+way the limit is held and the limit itself. To compare the two ways at one
+limit, the user's professor's interest in the margin design (the rollout
+filters must foresee overheating themselves) is run at **70 °C**: the 85 °C
+design with every 85 replaced by 70, and the barrier arm's start draw.
+
+| | Barrier arm (`*_thermal_cbf`) | Margin arm (`*_thermal70`) |
+|---|---|---|
+| How 70 °C is held | torque clip below every controller | learned: in the margin, episode ends at 70 °C |
+| Margin | $\min(g_\text{tilt}, g_\text{contact})$ | $\min\big(g_\text{tilt}, g_\text{contact}, (70 - \max_i T_{w,i})/10\big)$ |
+| Overheat termination | none | $\max_i T_{w,i} \ge 70$ °C, a failure |
+| Barrier | $\gamma = 1$/s | none |
+| Start temperatures | level U(30, 70), windings U(30, level), housings 0–20 °C cooler | same |
+| Observations, bank, recipe | actor 127-D, critic / WM 171-D, identified-G1 bank, no-height recipe | same |
+
+In the margin arm SONIC and every filter run with no barrier, so an episode
+also fails when SONIC (or a filter that let it act) overheats a winding;
+`rollout:1` and `wmmin:*` see the thermal term in their margins (the CPU
+rollout reads the limit from the margin's `thermal` attribute).
+
+| Piece | Path |
+|---|---|
+| Margin | `thermal.py`: `LIMIT70_C` (= `CBF_LIMIT_C`), `g_thermal(env, limit_c)`, `g_fall_noheight_thermal70` |
+| Builder, tasks | `env_cfg.py` (`g1_recover_thermal70_env_cfg`; new kwarg `thermal_overheat_c`), `tasks/g1_recover.py` (`g1_recover_thermal70`, `g1_recover_lafan_thermal70`) |
+| Config | `configs/g1_recover_sonic_thermal70_safetyshac1p.yaml` (identical to the other two but for `task:`) |
+| Sweep | `configs/sweeps/shac_thermal70/`: `smoke.sh`, `jobs.txt`, `wmreport_jobs.txt`, `wmreport_seed.sh` → `runs/shac_thermal70/` |
+
+`eval_sonic_qcbf.py` now reports an overheated episode's peak at the
+termination's own limit (it was fixed at 85 °C), and `train_model_based.py`
+logs the termination's limit and the margin's thermal term at start-up
+(`g1_sysid.json`: `overheat_c`, `margin_thermal`).

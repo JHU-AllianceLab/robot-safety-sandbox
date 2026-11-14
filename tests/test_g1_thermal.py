@@ -384,3 +384,47 @@ def test_thermal_cbf_tasks_register_the_decoupled_design():
           "motor_temp_max"} <= set(cfg.metrics)
   with pytest.raises(ValueError):
     spec("g1_recover_thermal_cbf").cfg_builder(thermal_overheat_termination=True)
+
+
+def test_thermal70_margin_and_termination_sit_at_70():
+  env = _env_with_temps([50.0, 60.0, 69.9, 70.0, 75.0])
+  g = T.g_thermal(env, T.LIMIT70_C)
+  assert torch.allclose(g, torch.tensor([2.0, 1.0, 0.01, 0.0, -0.5]), atol=1e-4)
+  assert T.LIMIT70_C == T.CBF_LIMIT_C == 70.0
+  assert T.motor_overheat(env, limit_c=T.LIMIT70_C).tolist() == [False, False, False, True, True]
+  gm = T.g_fall_noheight_thermal70(env)
+  assert torch.allclose(gm, torch.minimum(torch.ones(5), g), atol=1e-5)
+  # the CPU rollout reads the limit from here
+  assert T.g_fall_noheight_thermal70.thermal == {"limit_c": 70.0, "scale_c": T.SCALE_C}
+  assert T.g_fall_noheight_thermal70.fall_height_term is False
+  # the 85 C margin is untouched
+  assert torch.allclose(T.g_thermal(env), (85.0 - torch.tensor([50.0, 60.0, 69.9, 70.0, 75.0])) / 10.0)
+  assert T.g_fall_noheight_thermal.thermal["limit_c"] == 85.0
+
+
+def test_thermal70_tasks_are_the_85c_design_at_70():
+  _sysid_or_skip()
+  import robot_safety_sandbox  # noqa: F401  (registers on import)
+  from robot_safety_sandbox.registry import AVOID, spec
+  for tid, parent in (("g1_recover_thermal70", "g1_recover_thermal"),
+                      ("g1_recover_lafan_thermal70", "g1_recover_lafan_thermal")):
+    s, p = spec(tid), spec(parent)
+    assert s.mode == AVOID and s.margin_fn.avoid_margin is T.g_fall_noheight_thermal70, tid
+    assert (s.ctrl_dim, s.dstb_dim, s.kwargs) == (p.ctrl_dim, p.dstb_dim, p.kwargs), tid
+  cfg = spec("g1_recover_thermal70").cfg_builder()
+  th_cfg = spec("g1_recover_thermal").cfg_builder()
+  cbf_cfg = spec("g1_recover_thermal_cbf").cfg_builder()
+  assert cfg.terminations["motor_overheat"].params["limit_c"] == 70.0
+  assert th_cfg.terminations["motor_overheat"].params["limit_c"] == 85.0
+  assert set(cfg.terminations) == set(th_cfg.terminations)
+  assert not isinstance(cfg.actions["joint_pos"], T.ThermalBarrierActionCfg)
+  assert not any(k.startswith("cbf_") for k in cfg.metrics)
+  tc = cfg.metrics["motor_temp_max"].params["thermal_cfg"]
+  assert tc == cbf_cfg.metrics["motor_temp_max"].params["thermal_cfg"]   # the barrier arm's draw
+  assert tc.start_level_c == (30.0, 70.0)
+  assert list(cfg.observations["actor"].terms) == list(cbf_cfg.observations["actor"].terms)
+  assert list(cfg.observations["critic"].terms) == list(cbf_cfg.observations["critic"].terms)
+  with pytest.raises(ValueError):
+    spec("g1_recover_thermal70").cfg_builder(thermal_barrier_c=70.0)
+  with pytest.raises(ValueError):
+    spec("g1_recover_thermal70").cfg_builder(thermal_overheat_termination=False)

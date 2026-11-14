@@ -77,10 +77,41 @@ def main(argv=None):
   n_all, Hmax = int(pred.shape[0]), int(pred.shape[1])
   idx = torch.arange(n_all)
   A, B = idx % 2 == 0, idx % 2 == 1
+  # --wm-thermal of the calibration run (the eval refuses a table of the other mode)
+  wm_thermal = ((d["meta"].get("wmrollout") or {}).get("thermal") or {}).get("mode", "nn")
   rep = {"tag": a.tag, "calib": os.path.abspath(a.calib), "condition": a.condition, "dt": dt,
+         "wm_thermal": wm_thermal,
          "episodes": n_all, "calibration_half": int(A.sum()), "test_half": int(B.sum()),
          "min_eps": {f"{c:g}": {} for c in COVERAGES},
          "two_sided_eps": {f"{c:g}": {} for c in COVERAGES}, "horizons": {}}
+  if "calib_pred_tw" in rec:
+    # thermal tasks: the predicted hottest winding vs the real one (live steps only)
+    tp = rec["calib_pred_tw"].double()[:, 0][ok]
+    tr = rec["calib_real_tw"].double()[ok]
+    temp = {}
+    for hs in HORIZONS_S:
+      H = int(round(hs / dt))
+      if H > Hmax:
+        continue
+      e = tp[:, H - 1] - tr[:, H - 1]
+      e = e[torch.isfinite(e)]
+      hot = torch.isfinite(tr[:, H - 1]) & (tr[:, H - 1] >= 60.0)
+      eh = (tp[:, H - 1] - tr[:, H - 1])[hot]
+      temp[f"{hs:g}"] = {
+        "steps": H, "n": int(e.numel()),
+        "err_C_mean": float(e.mean()) if e.numel() else None,
+        "abs_err_C_median": float(e.abs().median()) if e.numel() else None,
+        "abs_err_C_p95": float(torch.quantile(e.abs(), 0.95)) if e.numel() else None,
+        "n_real_at_least_60C": int(hot.sum()),
+        "err_C_mean_real_at_least_60C": float(eh.mean()) if eh.numel() else None,
+        "abs_err_C_p95_real_at_least_60C": (float(torch.quantile(eh.abs(), 0.95))
+                                            if eh.numel() else None)}
+    rep["hottest_winding_error"] = temp
+    print(f"[min-tube] {a.tag} ({wm_thermal}): predicted - real hottest winding, C")
+    for h, row in temp.items():
+      print(f"  H={h:>3s}s: n {row['n']}, mean {row['err_C_mean']}, |.| median "
+            f"{row['abs_err_C_median']}, p95 {row['abs_err_C_p95']}; real >= 60 C: "
+            f"n {row['n_real_at_least_60C']}, mean {row['err_C_mean_real_at_least_60C']}")
 
   for hs in HORIZONS_S:
     H = int(round(hs / dt))

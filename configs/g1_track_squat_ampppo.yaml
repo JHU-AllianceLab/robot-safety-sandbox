@@ -1,0 +1,44 @@
+# Squat tracking (fightAndSports1_subject1, 166-179 s) with PPO + AMP, bare or inside a
+# world-model tube filter whose fallback is a frozen thermal SHAC policy.
+# The arm (--arm, examples/track_common.ARMS) picks the world and the filter:
+#   t70_bare t70_wm_d0 t70_wm_d1 cbf_bare cbf_wm_d0 cbf_wm_d1
+#
+#   python examples/train.py --config configs/g1_track_squat_ampppo.yaml --arm t70_wm_d1 \
+#       --seed 2 --stage pilot
+#
+# Design, decisions and amendments: runs/track_squat/design/ (AMENDMENTS.md wins);
+# docs/experiments/track-squat-filtered.md. Sweep: configs/sweeps/track_squat/.
+family: track
+
+num_envs: 4096
+steps: 1000000000          # the pilot's length; the final budget B comes from the pilot
+checkpoint_every: 25000000
+
+# PPO, BeyondMimic-like (mjlab tasks/tracking/config/g1/rl_cfg.py) on safety_sb3's tensor path
+n_steps: 24                # x 4096 envs = 98,304 samples per update, 4 minibatches x 5 epochs
+lr: 0.001                  # KL-adaptive (desired_kl), never a schedule over the total steps
+desired_kl: 0.01
+ent_coef: 0.005
+vf_coef: 1.0
+gamma: 0.99                # constant: no gamma anneal (the pilot's checkpoint must be a valid final run)
+gae_lambda: 0.95
+clip_range: 0.2
+net: 512,256,128           # pi and vf, ELU
+init_std: 0.5              # exploration noise heats windings; 70 C ends a thermal70 episode
+std_floor: 0.05
+std_ceil: 1.0
+action_rate_coef: 0.05     # on the PPO loss over the proposals' means, not on executed actions
+
+# AMP (Peng et al. 2021): style reward 0.4 x the task's positive weights (~30% of the reward at most)
+w_style: auto
+w_style_frac: 0.4
+amp_expert: data/g1_amp_expert_lafan_train_v1.pt
+amp_d_steps: 20
+amp_batch: 4096
+amp_replay: 1000000
+amp_lr: 0.0001
+
+# the filter
+conf: 0.95                 # the frozen tubes' coverage
+
+wandb_project: track_squat

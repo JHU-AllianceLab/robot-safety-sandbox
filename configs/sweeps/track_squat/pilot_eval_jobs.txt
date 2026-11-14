@@ -1,0 +1,18 @@
+# Squat tracking, PILOT evals (examples/eval_track.py) then the report (last line).
+#   sbatch -A hhu49_alliance1 -p rtx6000,h100,h200,a100,l40s --array=1-16 --gres=gpu:1 --cpus-per-task=8 --mem=64G --time=08:00:00 --job-name=track_pilot_eval --output=logs/slurm/%x_%A_%a.out examples/slurm_jobs.sbatch configs/sweeps/track_squat/pilot_eval_jobs.txt  (--dependency=afterok:<pilot array>)
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --stage pilot --arm t70_bare --seed 2 --world thermal70 --conditions bare wm_d0 wm_d1 wm_d0_c90 wm_d1_c90 wmcalib --out runs/track_squat/eval/pilot/t70_bare_s2/thermal70
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --stage pilot --arm t70_bare --seed 2 --world thermal_cbf --conditions bare wm_d0 wm_d1 --out runs/track_squat/eval/pilot/t70_bare_s2/thermal_cbf
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --stage pilot --arm t70_wm_d0 --seed 2 --world thermal70 --conditions bare wm_d0 wm_d1 wm_d0_c90 wm_d1_c90 wmcalib --out runs/track_squat/eval/pilot/t70_wm_d0_s2/thermal70
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --stage pilot --arm t70_wm_d0 --seed 2 --world thermal_cbf --conditions bare wm_d0 wm_d1 --out runs/track_squat/eval/pilot/t70_wm_d0_s2/thermal_cbf
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --stage pilot --arm t70_wm_d1 --seed 2 --world thermal70 --conditions bare wm_d0 wm_d1 wm_d0_c90 wm_d1_c90 wmcalib --out runs/track_squat/eval/pilot/t70_wm_d1_s2/thermal70
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --stage pilot --arm t70_wm_d1 --seed 2 --world thermal_cbf --conditions bare wm_d0 wm_d1 --out runs/track_squat/eval/pilot/t70_wm_d1_s2/thermal_cbf
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --stage pilot --arm cbf_bare --seed 2 --world thermal70 --conditions bare wm_d0 wm_d1 --out runs/track_squat/eval/pilot/cbf_bare_s2/thermal70
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --stage pilot --arm cbf_bare --seed 2 --world thermal_cbf --conditions bare wm_d0 wm_d1 wm_d0_c90 wm_d1_c90 wmcalib --out runs/track_squat/eval/pilot/cbf_bare_s2/thermal_cbf
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --stage pilot --arm cbf_wm_d0 --seed 2 --world thermal70 --conditions bare wm_d0 wm_d1 --out runs/track_squat/eval/pilot/cbf_wm_d0_s2/thermal70
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --stage pilot --arm cbf_wm_d0 --seed 2 --world thermal_cbf --conditions bare wm_d0 wm_d1 wm_d0_c90 wm_d1_c90 wmcalib --out runs/track_squat/eval/pilot/cbf_wm_d0_s2/thermal_cbf
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --stage pilot --arm cbf_wm_d1 --seed 2 --world thermal70 --conditions bare wm_d0 wm_d1 --out runs/track_squat/eval/pilot/cbf_wm_d1_s2/thermal70
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --stage pilot --arm cbf_wm_d1 --seed 2 --world thermal_cbf --conditions bare wm_d0 wm_d1 wm_d0_c90 wm_d1_c90 wmcalib --out runs/track_squat/eval/pilot/cbf_wm_d1_s2/thermal_cbf
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --sonic --world thermal70 --conditions bare wm_d0 wm_d1 --out runs/track_squat/eval/pilot/sonic/thermal70
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --sonic --world thermal_cbf --conditions bare wm_d0 wm_d1 --out runs/track_squat/eval/pilot/sonic/thermal_cbf
+configs/sweeps/track_squat/quiet.sh python examples/eval_track.py --stage pilot --arm t70_wm_d1 --seed 2 --world thermal70 --conditions wm_d1 --fb-seeds 2 --repeat 2 --out runs/track_squat/eval/pilot/repeat/t70_wm_d1_s2
+configs/sweeps/track_squat/quiet.sh python examples/track_report.py --stage pilot  # always

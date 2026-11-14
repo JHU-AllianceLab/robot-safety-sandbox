@@ -29,6 +29,7 @@ from .tasks import go2_tunnel as _go2_tunnel
 from .tasks import car_goal as _car_goal
 from .tasks import go2_velocity as _go2_velocity
 from .tasks import g1_velocity as _g1_velocity
+from .tasks import g1_track as _g1_track
 
 # safety tasks (margins + safety_sb3 learners)
 _go2_gap.register_all()
@@ -50,6 +51,7 @@ _car_goal.register_all()  # bicycle5d analog: diff-drive car reach-avoid (tutori
 # go2_crawl_walk{,_video} register alongside their safety twins in go2_crawl.
 _go2_velocity.register_all()  # go2_walker_flat: the blind flat-terrain pi_task
 _g1_velocity.register_all()  # g1_walker_flat: the same, on the humanoid
+_g1_track.register_all()  # g1_track_squat_*: LAFAN squat tracking in a thermal fallback's world (+ margins)
 
 __all__ = [
   "MjlabTensorSafetyEnv", "MjlabNumpySafetyEnv", "build_task_cfg",
