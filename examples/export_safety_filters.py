@@ -219,6 +219,35 @@ The fallback alone survives 97.6% (thermal70 world, 0.4% overheat) and 96.4%
 (barrier world). The barrier world's clip also acts under SONIC, so its column
 is a different environment. The 3 s horizon is not released.
 
+## Quick start: the walk4 training in `g1_safety_porl`
+
+The four walk-tracking arms of `JHU-AllianceLab/g1_safety_porl`, branch
+`wm-filter-walk4` (its `docs/wm_filter_walk4.md` explains the setup), read
+seed 0 of this repo:
+
+| task id | filter variant | checkpoint (fallback + world model) | tube |
+|---|---|---|---|
+| `G1TP-Track-Walk4-WM-Bare` | none | none | none |
+| `G1TP-Track-Walk4-WM-FallCBF` | `fall_only_cbf` | `thermal_cbf/s0/` | `thermal_cbf/s0/tubes/fall_only.json` |
+| `G1TP-Track-Walk4-WM-Joint` | `joint` | `thermal70/s0/` | `thermal70/s0/tubes/joint.json` |
+| `G1TP-Track-Walk4-WM-Hybrid` | `separate` | `thermal70/s0/` | `thermal70/s0/tubes/separate.json` |
+
+```bash
+hf auth login                                  # this repo is private
+hf download {repo_id} --local-dir ~/g1-thermal-safety-filters
+export G1_FILTER_RELEASE=~/g1-thermal-safety-filters
+cd g1_safety_porl && git checkout wm-filter-walk4 && source scripts/wm_env.sh   # other paths: see the script
+python scripts/train_wm.py G1TP-Track-Walk4-WM-Joint --env.scene.num-envs 4096 --agent.seed 1 \
+    --log-root $WM_LOG_ROOT                    # or: sbatch --array=0-3 scripts/wm_train.sbatch
+```
+
+The filter options are train-CLI fields, for example
+`--env.actions.joint-pos.wm.seed 1` (another seed of this repo) or
+`--env.actions.joint-pos.wm.dwell-s 2.0`. On its first step the env checks
+itself against `layouts/` and the run's `g1_sysid.json`, and the files against
+`manifest.json`; it stops with a list of mismatches rather than run a filter on
+a world it was not trained for.
+
 ## Files
 
     layouts/thermal70.json, layouts/thermal_cbf.json   what the fallback reads of an env (check_binding reference)
@@ -226,8 +255,15 @@ is a different environment. The 3 s horizon is not released.
                                                         g1_sysid.json, manifest.json, tubes/joint.json, tubes/separate.json
     thermal_cbf/s{{0,1,2}}/                               ..., tubes/fall_only.json
 
-`manifest.json` holds the sha256 of every file and each tube's calibration
-record; the loader refuses a file that does not match.
+| file | what it is |
+|---|---|
+| `final_model.zip` | the SHAC run (`safety_sb3`): the fallback policy (actor), its learned world model and critic |
+| `tensornormalize.pt` | the fallback's observation normalizer |
+| `config.yaml` | the training config of the run |
+| `g1_sysid.json` | the thermal world the run was trained in (heat model version and hashes, CBF clip or 70 C margin); the loader compares it with your env |
+| `tubes/*.json` | the calibrated bound eps per horizon and coverage, with the calibration's record |
+| `manifest.json` | sha256 of every file and each tube's calibration record; the loader refuses a file that does not match |
+| `layouts/*.json` | the fallback's observation groups, sim-context columns and action term, as `check_binding` compares them |
 
 ## Requirements
 
@@ -243,8 +279,10 @@ The filter reads the env exactly as the fallback was trained and calibrated:
 * the fallback's `actor` (127-D) and `critic` (171-D) observation groups and
   the 33-D sim context (startup domain randomization), next to your policy's
   own groups;
-* the sysID robot, its `MotorThermal` (winding / housing / structure) and the
-  same start-temperature draw;
+* the sysID robot and its `MotorThermal` (winding / housing / structure); a
+  different start-temperature draw is accepted with
+  `allow=("thermal_start",)` (the walk4 training draws every winding in
+  40-60 C);
 * the `joint_pos` action term of the fallback's world (29 joints, its scale and
   offset; in the barrier world, the temperature-barrier action term), 50 Hz
   control over 4 x 5 ms physics steps.
