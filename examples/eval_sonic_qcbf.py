@@ -204,6 +204,31 @@ from robot_safety_sandbox.envs.g1_recover.thermal import LIMIT_C, has_thermal, t
 from robot_safety_sandbox.envs.g1_recover.states import (  # noqa: E402
   FIELDS, KIND_MOCAP, OPTIONAL_FIELDS, load_bank, save_bank)
 from robot_safety_sandbox.eval.policies import load_twin, reset_policy_memory  # noqa: E402
+
+
+def load_pi(zip_path: str, device: str):
+  """``(model, norm)`` of the policy pi: a safety twin (``load_twin``), or else a
+  plain SB3 task policy with its ``vecnormalize.pkl`` statistics (e.g. the g1_cool
+  cooling policy, stock PPO on the numpy bridge), normalized the way VecNormalize
+  does it."""
+  from robot_safety_sandbox.eval.policies import load_nominal
+  try:
+    return load_twin(zip_path, device)
+  except SystemExit as e:
+    twin_err = str(e).splitlines()[0]
+  model, vn = load_nominal(zip_path, device, quiet=True)
+  if vn is None or not hasattr(vn, "obs_rms"):
+    raise SystemExit(f"[qcbf] {zip_path}: not a safety twin ({twin_err}) and no "
+                     f"vecnormalize.pkl next to it")
+  mean = torch.as_tensor(vn.obs_rms.mean, dtype=torch.float32, device=device)
+  var = torch.as_tensor(vn.obs_rms.var, dtype=torch.float32, device=device)
+  eps, clip = float(vn.epsilon), float(vn.clip_obs)
+  print(f"[qcbf] pi = {type(model).__name__} task policy {zip_path} (+ VecNormalize stats)")
+
+  def norm(obs):
+    return torch.clamp((obs - mean) / torch.sqrt(var + eps), -clip, clip)
+
+  return model, norm
 from robot_safety_sandbox.filters import (  # noqa: E402
   LeastRestrictiveIntervention, QCBFDescentIntervention)
 
@@ -287,6 +312,27 @@ def _parse(argv=None):
   p.add_argument("--thermal-diag", action="store_true",
                  help="with --wm-thermal hybrid*: every control step, the heat model's one-step "
                       "prediction from the TRUE states vs the simulator's temperatures")
+  p.add_argument("--thermal-per-motor", action="store_true",
+                 help="on a thermal task: record every motor's winding per episode -- at the "
+                      "spawn, its peak, and at the episode's end (for an episode the env "
+                      "ended, the state just before the respawn, so the motors that tripped "
+                      "the overheat termination are the ones at or over its limit); "
+                      "examples/thermal_trip_report.py reads them")
+  p.add_argument("--thermal-start-c", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                 help="on a thermal task: every motor's winding starts at its own draw "
+                      "~ U(LO, HI) C, housing and structure at the winding (a robot that sat "
+                      "at room temperature), instead of the task's level + spread draw")
+  p.add_argument("--thermal-start-group", nargs=5, action="append", default=None,
+                 metavar=("SUBSTR", "TW_LO", "TW_HI", "GAP_LO", "GAP_HI"),
+                 help="repeatable, with --thermal-start-c: the motors whose name contains "
+                      "SUBSTR start hot instead -- winding ~ U(TW_LO, TW_HI) C per motor, "
+                      "housing = winding - U(GAP_LO, GAP_HI) (not below its --thermal-start-c "
+                      "draw), structure at its --thermal-start-c draw (capped at the housing)")
+  p.add_argument("--thermal-trace-s", type=float, default=None, metavar="DT",
+                 help="on a thermal task: every DT s of each episode, record every motor's "
+                      "winding, housing and mean squared motor torque since the last sample "
+                      "(tw_trace_m_c, th_trace_m_c, tau2_trace_m; NaN once the episode "
+                      "ended); examples/thermal_cool_report.py reads them")
   p.add_argument("--exclude-categories", nargs="+", default=[], metavar="NAME",
                  help="draw no episode from these clip categories (e.g. fallAndGetUp sprint)")
   p.add_argument("--no-obs-noise", action="store_true",
@@ -339,6 +385,23 @@ def _parse(argv=None):
       p.error(f"{name} needs 0 < lo <= hi and lo >= one control step ({DT} s)")
   if not 0.0 <= a.dv_range[0] <= a.dv_range[1]:
     p.error("--dv-range needs 0 <= lo <= hi")
+  if a.thermal_start_c is not None and not 0.0 < a.thermal_start_c[0] <= a.thermal_start_c[1]:
+    p.error("--thermal-start-c needs 0 < LO <= HI")
+  if a.thermal_start_group:
+    if a.thermal_start_c is None:
+      p.error("--thermal-start-group needs --thermal-start-c (the other motors' draw)")
+    parsed = []
+    for sub, *v in a.thermal_start_group:
+      try:
+        tlo, thi, glo, ghi = (float(x) for x in v)
+      except ValueError:
+        p.error(f"--thermal-start-group {sub}: TW_LO TW_HI GAP_LO GAP_HI must be numbers")
+      if not (0.0 < tlo <= thi and 0.0 <= glo <= ghi):
+        p.error(f"--thermal-start-group {sub}: needs 0 < TW_LO <= TW_HI, 0 <= GAP_LO <= GAP_HI")
+      parsed.append([sub, tlo, thi, glo, ghi])
+    a.thermal_start_group = parsed
+  if a.thermal_trace_s is not None and int(round(a.thermal_trace_s / DT)) < 1:
+    p.error(f"--thermal-trace-s must be >= one control step ({DT} s)")
   if any(b <= c for b, c in zip(a.dv_bins[1:], a.dv_bins[:-1])) or len(a.dv_bins) < 2:
     p.error("--dv-bins must be at least two increasing edges")
   if min(a.window_s, a.badref_window_s, a.duration_s) <= 0.0:
@@ -504,7 +567,7 @@ class Evaluator:
     a = self.a
     work = os.path.join(a.out, "rollout")
     os.makedirs(work, exist_ok=True)
-    m_cpu, n_cpu = load_twin(a.policy, "cpu")
+    m_cpu, n_cpu = load_pi(a.policy, "cpu")
     m_cpu.policy.set_training_mode(False)
     obs_dim = int(self.mj.observation_manager.compute_group(
       self.env.obs_key, update_history=False).shape[1])
@@ -863,6 +926,61 @@ class Evaluator:
     if rec_tw:
       c_pred_tw = torch.full((E, ctl.cond.n_rollouts or 1, Hc), math.nan, device=dev)
       c_real_tw = torch.full((E, Hc), math.nan, device=dev)
+    # --thermal-per-motor: each motor's winding per episode at the spawn, its peak and at
+    # the end. An env the env ended has already respawned (new temperatures) when the
+    # loop sees it, so the state's reset is wrapped to keep the windings it overwrote.
+    pm = bool(getattr(a, "thermal_per_motor", False)) and therm is not None
+    if pm:
+      Km = len(therm.names)
+      ep_tw0_m = torch.full((E, Km), math.nan, device=dev)
+      ep_twpk_m = torch.full((E, Km), math.nan, device=dev)
+      ep_twend_m = torch.full((E, Km), math.nan, device=dev)
+      if not hasattr(therm, "pre_reset_Tw"):
+        therm.pre_reset_Tw = therm.Tw.clone()
+        _orig_reset = therm.reset
+
+        def _keep_then_reset(env_ids=None, _orig=_orig_reset, _st=therm):
+          ids = slice(None) if env_ids is None else env_ids
+          _st.pre_reset_Tw[ids] = _st.Tw[ids]
+          _orig(env_ids)
+
+        therm.reset = _keep_then_reset
+    # --thermal-start-group: hot motor groups on top of the --thermal-start-c draw (the
+    # integrator's reset calls the state's draw, so wrapping it covers every respawn)
+    grp = getattr(a, "thermal_start_group", None)
+    if grp and therm is not None and not hasattr(therm, "_base_draw"):
+      specs = []
+      for sub, tlo, thi, glo, ghi in grp:
+        idx = [i for i, nm in enumerate(therm.names) if sub in nm]
+        if not idx:
+          raise SystemExit(f"[qcbf] --thermal-start-group {sub}: no motor name contains it "
+                           f"({list(therm.names)})")
+        specs.append((torch.tensor(idx, device=dev), tlo, thi, glo, ghi))
+      therm._base_draw = therm.draw
+
+      def _group_draw(nn, generator=None, _st=therm, _specs=specs):
+        Tw, Th, Ts = _st._base_draw(nn, generator)
+        for idx, tlo, thi, glo, ghi in _specs:
+          kk = int(idx.numel())
+          u1 = torch.rand(nn, kk, device=Tw.device, generator=generator)
+          u2 = torch.rand(nn, kk, device=Tw.device, generator=generator)
+          tw = tlo + (thi - tlo) * u1
+          th = torch.minimum(torch.maximum(tw - (glo + (ghi - glo) * u2), Th[:, idx]), tw)
+          Tw[:, idx] = tw
+          Th[:, idx] = th
+          Ts[:, idx] = torch.minimum(Ts[:, idx], th)
+        return Tw, Th, Ts
+
+      therm.draw = _group_draw
+    # --thermal-trace-s: every motor's winding / housing / mean tau_m^2 every tstride steps
+    tstride = (_steps(a.thermal_trace_s) if getattr(a, "thermal_trace_s", None)
+               and therm is not None else 0)
+    if tstride:
+      Kt = len(therm.names)
+      Tn = (int(eps["on"].max()) + window + 2) // tstride + 1
+      tr_tw = torch.full((E, Tn, Kt), math.nan, device=dev)
+      tr_th = torch.full((E, Tn, Kt), math.nan, device=dev)
+      tr_tau2 = torch.full((E, Tn, Kt), math.nan, device=dev)
     # --thermal-diag: the heat model's one-step prediction from the TRUE states
     diag = bool(a.thermal_diag) and self.hyb is not None and therm is not None
     if diag:
@@ -902,6 +1020,15 @@ class Evaluator:
         over = torch.zeros(n, dtype=torch.bool, device=dev)
         clip_sum = torch.zeros(n, device=dev)
         clip_cnt = torch.zeros(n, device=dev)
+      if pm:
+        tw0_m = therm.Tw.clone()
+        twpk_m = tw0_m.clone()
+      if tstride:
+        t_ids = take.nonzero(as_tuple=False).squeeze(-1)
+        tr_tw[ep[t_ids], 0] = therm.Tw[t_ids]
+        tr_th[ep[t_ids], 0] = therm.Th[t_ids]
+        tau2_acc = torch.zeros(n, Kt, device=dev)
+        tau2_cnt = torch.zeros(n, device=dev)
       k = torch.zeros(n, dtype=torch.long, device=dev)
       if on_step is not None:
         on_step(ep, k, None)
@@ -1030,6 +1157,26 @@ class Evaluator:
         if therm is not None:
           # a done env has respawned with new temperatures: keep its pre-step peak
           tw_peak = torch.where(dones, tw_peak, torch.maximum(tw_peak, therm.Tw.amax(1)))
+          if pm:
+            # this step's windings; a done env's from just before its respawn
+            tw_now_m = torch.where(dones.unsqueeze(1), therm.pre_reset_Tw, therm.Tw)
+            twpk_m = torch.maximum(twpk_m, tw_now_m)
+          if tstride:
+            # live envs only (a done env has respawned); the motor torque of the last
+            # physics substep stands for the control step's
+            live_t = track & ~dones
+            tau_m, _w_m = therm.motor_inputs()
+            tau2_acc += torch.where(live_t.unsqueeze(1), tau_m * tau_m, 0.0)
+            tau2_cnt += live_t.float()
+            at_t = live_t & (k % tstride == 0)
+            if bool(at_t.any()):
+              a_ids = at_t.nonzero(as_tuple=False).squeeze(-1)
+              e_t, j_t = ep[a_ids], k[a_ids] // tstride
+              tr_tw[e_t, j_t] = therm.Tw[a_ids]
+              tr_th[e_t, j_t] = therm.Th[a_ids]
+              tr_tau2[e_t, j_t] = tau2_acc[a_ids] / tau2_cnt[a_ids].clamp_min(1.0).unsqueeze(1)
+              tau2_acc[a_ids] = 0.0
+              tau2_cnt[a_ids] = 0.0
           over = (mj.termination_manager.get_term("motor_overheat") & dones if has_oh
                   else torch.zeros_like(dones))
           if bar_c is not None:
@@ -1084,6 +1231,10 @@ class Evaluator:
                                            tw_peak[f_ids])
               ep_tw_start[e_] = tw_start[f_ids]
               ep_clip[e_] = clip_sum[f_ids] / clip_cnt[f_ids].clamp_min(1.0)
+              if pm:
+                ep_tw0_m[e_] = tw0_m[f_ids]
+                ep_twpk_m[e_] = twpk_m[f_ids]
+                ep_twend_m[e_] = tw_now_m[f_ids]
         book.finish(oc["fell"], ep, False, k, on)
         book.finish(oc["up"], ep, True, k, on)
         self._finish(oc["up"])
@@ -1125,6 +1276,24 @@ class Evaluator:
                    "env_steps_per_s": loop * n / max(time.time() - t0, 1e-6),
                    # the share of pi's tracked steps whose last action left the box
                    "pi_obs_clamped": (pi_clamped / pi_steps) if pi_steps else None}
+    if tstride:
+      rec.update(tw_trace_m_c=tr_tw.cpu(), th_trace_m_c=tr_th.cpu(), tau2_trace_m=tr_tau2.cpu())
+      rec["_run"]["thermal_trace_s"] = tstride * DT
+      rec["_run"]["thermal_motor_names"] = list(therm.names)
+      rec["_run"]["overheat_limit_c"] = oh_c if has_oh else None
+    if pm:
+      rec.update(tw_start_m_c=ep_tw0_m.cpu(), tw_peak_m_c=ep_twpk_m.cpu(),
+                 tw_end_m_c=ep_twend_m.cpu())
+      rec["_run"]["thermal_motor_names"] = list(therm.names)
+      rec["_run"]["overheat_limit_c"] = oh_c if has_oh else None
+      if has_oh:
+        tripped = ep_twend_m >= oh_c
+        no_trip = int((ep_over & ~tripped.any(1)).sum())
+        cnt = tripped[ep_over].sum(0)
+        top = sorted(((int(c), nm) for c, nm in zip(cnt.tolist(), therm.names) if c), reverse=True)
+        print(f"[qcbf]   {label} {ctl.cond.name}: motors at/over {oh_c:g} C when the overheat "
+              f"termination fired ({int(ep_over.sum())} episodes; {no_trip} with none -- must "
+              f"be 0): " + ", ".join(f"{nm} {c}" for c, nm in top[:8]), flush=True)
     if diag and dg_hot["n"]:
       nn_ = dg["n"].clamp_min(1.0)
       names = list(therm.names)
@@ -1365,7 +1534,13 @@ def main(argv=None):
                 + [a.badref_onset_s[1] + a.badref_window_s] * ("badref" in a.suites))
   overrides = dict(dataset=bank_path, sampler="sequential", sequential_repeats=1,
                    weights=weights, episode_length_s=float(longest + 1.0), rest_terminate=False)
-  push_kw = dict(interval_s=(1.0, 2.0), duration_s=0.2, first_delay_s=(0.1, 0.4),
+  if a.thermal_start_c is not None:
+    # ThermalCfg.draw: level ~ U(HI, HI) = HI, winding = LO + (HI - LO) U(0, 1) per motor,
+    # housing = winding - 0 (floored at LO), structure = housing
+    lo_c, hi_c = (float(x) for x in a.thermal_start_c)
+    overrides.update(thermal_start_level_c=(hi_c, hi_c), thermal_start_floor_c=lo_c,
+                     thermal_housing_gap_c=(0.0, 0.0))
+  push_kw =dict(interval_s=(1.0, 2.0), duration_s=0.2, first_delay_s=(0.1, 0.4),
                  horizontal=True, max_pushes=0)
   video = a.video_episodes is not None
 
@@ -1399,7 +1574,7 @@ def main(argv=None):
                      "(sequential sampler over every row)")
   policy = SonicPolicy.from_onnx(a.sonic_dir).to(dev).eval()
   tracker = SonicTracker(env, policy, base)
-  model, norm = load_twin(a.policy, dev)
+  model, norm = load_pi(a.policy, dev)
   model.policy.set_training_mode(False)
   # only the suites that run: a push-only run needs no fits for the badref defaults
   variants = sorted({c.variant for c in list(a.push_conds) * ("push" in a.suites)
@@ -1456,6 +1631,8 @@ def main(argv=None):
           "values": {v: {"gamma": pv.gamma, "v": pv.info["v"]["path"], "q": pv.info["q"]["path"],
                          "eps": pv.eps} for v, pv in values.items()},
           "sonic_history": a.sonic_history, "num_envs": env.num_envs, "seed": a.seed,
+          "thermal_start_c": list(a.thermal_start_c) if a.thermal_start_c else None,
+          "thermal_start_group": a.thermal_start_group, "thermal_trace_s": a.thermal_trace_s,
           "quick": bool(a.quick), "dt": DT, "look_ahead": la, "categories": cats,
           "phases": list(ql.PHASES), "status": list(ql.STATUS),
           # every solver setting (kappa and the solver are per condition)

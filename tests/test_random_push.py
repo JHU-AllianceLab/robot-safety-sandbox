@@ -359,6 +359,39 @@ def test_an_unreachable_cap_draws_exactly_the_unlimited_process():
     assert torch.equal(f0, f1) and torch.equal(a0, a1)
 
 
+def test_force_frac_scales_each_random_push_once_within_its_range():
+  torch.manual_seed(5)
+  n = 2048
+  p = RandomPush(n, DT, "cpu", interval_s=(0.1, 0.2), duration_s=0.1,
+                 first_delay_s=(0.0, 0.0), force_frac=(0.25, 0.5))
+  scale = torch.full((n,), 0.8)
+  seen, prev = [], None
+  for _ in range(40):
+    f, a = p.forces(200.0, scale)
+    mag = f.norm(dim=1)
+    seen.append(mag[a])
+    # one magnitude for the whole push: unchanged while the same push acts
+    if prev is not None:
+      same = a & prev[1] & (p.age > 0)
+      assert torch.allclose(mag[same], prev[0][same])
+    prev = (mag, a)
+  m = torch.cat(seen)
+  lo, hi = 0.25 * 0.8 * 200.0, 0.5 * 0.8 * 200.0
+  assert float(m.min()) >= lo - 1e-3 and float(m.max()) <= hi + 1e-3
+  assert float(m.max()) - float(m.min()) > 0.8 * (hi - lo)     # a real spread
+  with pytest.raises(ValueError, match="force_frac"):
+    RandomPush(2, DT, "cpu", force_frac=(0.6, 0.3))
+
+
+def test_no_force_frac_draws_exactly_the_process_without_it():
+  def run(**kw):
+    torch.manual_seed(13)
+    p = RandomPush(16, DT, "cpu", interval_s=(0.1, 0.3), first_delay_s=(0.0, 0.2), **kw)
+    return [p.forces(80.0)[0].clone() for _ in range(200)]
+  for f0, f1 in zip(run(), run(force_frac=None)):
+    assert torch.equal(f0, f1)
+
+
 def test_forces_outputs_are_not_mutated_by_a_later_reset():
   p = RandomPush(3, DT, "cpu", first_delay_s=(0.0, 0.0))
   f, a = p.forces(50.0)

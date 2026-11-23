@@ -1,0 +1,10 @@
+# The start bank of the HYBRID-world-model Beat-It on sysID v0.6 (the user, 2026-11-21: "use the
+# more accurate heat model"): the recipe of configs/sweeps/shac_thermal/data_jobs.txt, verbatim,
+# on the v0.6 robot (task g1_recover_lafan_sysid_v6: the identified body -- limb masses / COMs,
+# joint friction measured in motion, ankle corner stops, foot contact, 37.40 kg). Same SONIC
+# harvest (LAFAN train clips, seed 0, 50k episodes, kick |dv| ~ U(0, 5) m/s, SONIC on the robot's
+# own hip pitch), rows 0 / 0.1 / 0.2 / 0.3 s after the kick, then the eta = 0.1 net.
+# Temperatures are not in the bank (drawn at every reset). One GPU, in order.
+python examples/harvest_g1_sonic_trajectories.py --task g1_recover_lafan_sysid_v6 --hip mjlab --library data/g1_lafan1_clips_train.pt --sonic-dir $HOME/gear_sonic_hf --episodes 50000 --seed 0 --bank-delays-s --out data/g1_sonic_push_gfall_sysid316v6_train.pt  # creates: data/g1_sonic_push_gfall_sysid316v6_train.pt
+python examples/harvest_g1_sonic_trajectories.py --from-traj data/g1_sonic_push_gfall_sysid316v6_train.pt --bank-delays-s 0 0.1 0.2 0.3 --bank-out data/g1_sonic_push_gfall_sysid316v6_train_bank.pt  # creates: data/g1_sonic_push_gfall_sysid316v6_train_bank.pt
+python examples/dedup_start_bank.py --bank data/g1_sonic_push_gfall_sysid316v6_train_bank.pt  # creates: data/g1_sonic_push_gfall_sysid316v6_train_bank_net.pt

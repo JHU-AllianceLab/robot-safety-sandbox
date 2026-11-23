@@ -116,7 +116,30 @@ def safety_margin_hook(env, margin_fn=None) -> torch.Tensor:
   l = torch.nan_to_num(l, nan=-3.0, posinf=3.0, neginf=-3.0)
   env.extras["zoo_g"] = g
   env.extras["zoo_l"] = l
+  _stash_head_targets(env, margin_fn, anchor)
   return g
+
+
+def _stash_head_targets(env, margin_fn, anchor: float) -> None:
+  """A HYBRID world model's head targets for this step (pre-reset, like g):
+  the FALL margin (the avoid margin's ``fall_margin``, clamped as compose does,
+  anchored on fall terminations) and the fall termination (every failure term
+  but ``motor_overheat``). Only margins that declare a ``fall_margin`` (the
+  ``*_thermal70`` tasks); read by ``MjlabTensorSafetyEnv.wm_head_targets``."""
+  fall_fn = getattr(getattr(margin_fn, "avoid_margin", None), "fall_margin", None)
+  if fall_fn is None:
+    return
+  from .margins import CLAMP
+  tm = env.termination_manager
+  fall = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+  for name in tm.active_terms:
+    if name in ("motor_overheat", SUCCESS_TERM) or tm.get_term_cfg(name).time_out:
+      continue
+    fall |= tm.get_term(name).bool()
+  gf = fall_fn(env).float().clamp(-CLAMP, CLAMP)
+  gf = torch.where(fall, torch.minimum(gf, torch.full_like(gf, anchor)), gf)
+  gf = torch.nan_to_num(gf, nan=anchor, posinf=3.0, neginf=-3.0)
+  env._zoo_head_targets = (gf, fall, int(env.common_step_counter))
 
 
 def margin_probe_hook(env, margin_fn=None) -> torch.Tensor:
@@ -850,6 +873,23 @@ class _MjlabCore:
         if keep:
           cols.append((kind, f, torch.as_tensor(keep, device=x.device)))
     return cols
+
+  # --- HYBRID world models (safety_sb3 SHAC, wm_hybrid=True) ------------------
+  def analytic_model_spec(self) -> dict:
+    """The analytic block of a hybrid world model for this env (the motor heat
+    model of a ``*_thermal70_v6`` task): ``{"factory", "config"}``, plain data
+    (filters/hybrid_thermal_model.py)."""
+    from .filters.hybrid_thermal_model import analytic_spec_from_env
+    return analytic_spec_from_env(self)
+
+  def wm_head_targets(self):
+    """``(g_head, term_head)`` of the last step: the fall margin and the fall
+    termination, without the thermal term (base._stash_head_targets)."""
+    t = getattr(self.mj, "_zoo_head_targets", None)
+    if t is None or t[2] != int(self.mj.common_step_counter):
+      raise RuntimeError("no head targets for this step: the task's margin declares no "
+                         "fall_margin (a hybrid world model needs a *_thermal70 task)")
+    return t[0], t[1]
 
   def sim_context(self):
     """The realized domain-randomization draw of each env, ``[num_envs, C]``,

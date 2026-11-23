@@ -145,7 +145,8 @@ def _record_thermal(env, outdir: str) -> None:
   import dataclasses
   import json
   from robot_safety_sandbox.envs.assets.g1_sysid import provenance
-  info = dict(provenance(), thermal_cfg=dataclasses.asdict(thermal_state(env.mj).cfg))
+  cfg = thermal_state(env.mj).cfg
+  info = dict(provenance(cfg.sysid_version), thermal_cfg=dataclasses.asdict(cfg))
   bar = env.mj.action_manager.get_term("joint_pos")
   info["barrier"] = ({"limit_c": bar.limit_c, "gamma": bar.gamma}
                      if hasattr(bar, "safe_targets") else None)
@@ -217,6 +218,20 @@ def main():
   p.add_argument("--action-bound-coef", type=float, default=1.0,
                  help="weight of the actor mean's squared excursion outside the "
                       "action box (the clamp passes no gradient back)")
+  p.add_argument("--handover-rate-coef", type=float, default=0.0,
+                 help="weight of mean ||a_0 - a_prev||^2 at EPISODE STARTS: the actor's "
+                      "first action against the last action the reset state carries "
+                      "(g1_recover's handover bank: the walker's last applied action), "
+                      "i.e. the jump at the handover to the fallback (value units; "
+                      "0 = off)")
+  p.add_argument("--handover-batch", type=int, default=1024,
+                 help="episode-start states per actor update for --handover-rate-coef")
+  p.add_argument("--wm-hybrid", action=argparse.BooleanOptionalAction, default=False,
+                 help="HYBRID world model (safety_sb3 >= feat/shac-hybrid-thermal): the env's "
+                      "analytic block (a *_thermal70_v6 task: the sysID heat model) owns the "
+                      "temperature dims, the networks never read or predict them, the head "
+                      "learns the fall margin / termination, imagination adds the 70 C margin "
+                      "and overheat termination from the heat model")
   # --- networks / optimization -------------------------------------------------
   p.add_argument("--net", default="512,256,128",
                  help="hidden dims for the actor AND the critic (match a PPO "
@@ -327,6 +342,8 @@ def main():
     lr_decay_iters=args.lr_decay_iters, lr_min_frac=args.lr_min_frac,
     action_rate_coef=args.action_rate_coef, action_mag_coef=args.action_mag_coef,
     action_bound_coef=args.action_bound_coef,
+    handover_rate_coef=args.handover_rate_coef, handover_batch_size=args.handover_batch,
+    **({"wm_hybrid": True} if args.wm_hybrid else {}),
     normalize_obs=True, gamma_anneal=args.gamma_anneal, tf32=args.tf32,
     policy_kwargs=dict(net_arch=dict(pi=net, vf=net)),
     seed=args.seed, verbose=1, device=args.device, tensorboard_log=outdir)

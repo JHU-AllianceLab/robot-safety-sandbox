@@ -367,11 +367,12 @@ def _thermal_spec(mj, robot) -> dict | None:
   """The ``Spec.thermal`` of a live env with a motor thermal state, else None."""
   import dataclasses
 
-  from robot_safety_sandbox.envs.assets.g1_sysid import SYSID_DIR
+  from robot_safety_sandbox.envs.assets.g1_sysid import sysid_dir
   from robot_safety_sandbox.envs.g1_recover.thermal import has_thermal, thermal_state
   if not has_thermal(mj):
     return None
   st = thermal_state(mj)
+  SYSID_DIR = sysid_dir(st.cfg.sysid_version)
   params = {}
   for f in dataclasses.fields(st.th):
     v = getattr(st.th, f.name)

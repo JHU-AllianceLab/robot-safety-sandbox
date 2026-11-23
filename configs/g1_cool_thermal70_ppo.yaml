@@ -1,0 +1,23 @@
+# COOLING POLICY (the user's request, 2026-11-18): after a handover from SONIC with hot
+# ankle / waist motors, stand through minor pushes and cool them
+# (task g1_cool_thermal70: robot_safety_sandbox/envs/g1_cool, tasks/g1_cool.py).
+#
+#   python examples/train.py --config configs/g1_cool_thermal70_ppo.yaml --seed 0 \
+#       --out runs/g1_cool/pilot_s0
+#
+# mode=cumulative -> stock SB3 PPO on the numpy bridge (the scripted in-episode pushes
+# rule out the SHAC world model). Reward weights live in envs/g1_cool/env_cfg.py
+# (REWARDS); override one with env_overrides: {reward_weights: {cool: 3.0}}.
+family: on_policy
+task: g1_cool_thermal70
+num_envs: 4096
+steps: 600000000
+seed: 0
+lr: 3.0e-4
+ent_coef: 5.0e-3
+n_steps: 24
+gamma: 0.99
+net: "512,256,128"
+env_overrides:
+  dataset: data/g1_cool_handover_bank_dv1p5.pt
+video_interval: 0        # no render env (EGL is not available on every GPU node)

@@ -534,7 +534,8 @@ def thermal_world_info(env) -> Optional[dict]:
   if not has_thermal(mj):
     return None
   from ..envs.assets.g1_sysid import provenance
-  info = dict(provenance(), thermal_cfg=dataclasses.asdict(thermal_state(mj).cfg))
+  tcfg = thermal_state(mj).cfg
+  info = dict(provenance(tcfg.sysid_version), thermal_cfg=dataclasses.asdict(tcfg))
   bar = mj.action_manager.get_term("joint_pos")
   info["barrier"] = ({"limit_c": bar.limit_c, "gamma": bar.gamma}
                      if hasattr(bar, "safe_targets") else None)
@@ -718,6 +719,15 @@ def check_binding(bundle: WMTubeBundle, env, *, actor_group: str = "actor",
       else:
         want = rec[k]
       have = world.get(k)
+      if k == "thermal_cfg" and isinstance(want, dict) and isinstance(have, dict):
+        # records written before ThermalCfg grew a field: compare the old fields, and
+        # accept the new one only at the value every older run implicitly had
+        for f, dflt in (("sysid_version", "0.4.0"),):
+          if f not in want and f in have:
+            if have[f] != dflt:
+              errs.append(f"thermal world thermal_cfg.{f}: env {have[f]!r}, fallback run "
+                          f"(no record: {dflt!r})")
+            have = {kk: vv for kk, vv in have.items() if kk != f}
       if k in ("overheat_termination", "overheat_c") and "overheat_termination" in allow:
         if have != want:
           warns.append(f"thermal world {k}: env {have!r}, fallback run {want!r} (allowed)")

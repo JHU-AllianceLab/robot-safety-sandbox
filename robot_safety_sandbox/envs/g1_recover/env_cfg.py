@@ -195,37 +195,52 @@ def g1_recover_noheight_nofoot_nolinvel_env_cfg(play: bool = False,
                             critic_foot_terms=False, critic_base_lin_vel=False, **kwargs)
 
 
-def use_sysid_robot(cfg: ManagerBasedRlEnvCfg, v_bus: float | None = None) -> None:
+def use_sysid_robot(cfg: ManagerBasedRlEnvCfg, v_bus: float | None = None,
+                    sysid_version: str | None = None) -> None:
   """Swap the robot for the lab's identified G1 (``envs/assets/g1_sysid.py``:
   measured waist ranges, refitted collision capsules, MuJoCo ``<dcmotor>``
-  actuators at battery voltage ``v_bus``). Names, gains, peak torques and
-  armatures are mjlab's G1's, so sensors, events, the action scale and the
-  observation layout carry over unchanged."""
+  actuators at battery voltage ``v_bus``; from sysID v0.6 also the identified
+  body). Names, gains, peak torques and armatures are mjlab's G1's, so
+  sensors, events, the action scale and the observation layout carry over
+  unchanged. ``sysid_version``: the pinned version (default v0.4.0)."""
   from robot_safety_sandbox.envs.assets.g1_sysid import (DEFAULT_V_BUS,
                                                          get_g1_sysid_robot_cfg)
   cfg.scene.entities["robot"] = get_g1_sysid_robot_cfg(
-    DEFAULT_V_BUS if v_bus is None else float(v_bus))
+    DEFAULT_V_BUS if v_bus is None else float(v_bus), version=sysid_version)
 
 
 def g1_recover_sysid_env_cfg(play: bool = False, v_bus: float | None = None,
+                             sysid_version: str | None = None,
                              **kwargs) -> ManagerBasedRlEnvCfg:
   """:func:`g1_recover_env_cfg` on the lab's identified G1 (:func:`use_sysid_robot`),
   no motor temperatures (the ``*_sysid`` tasks: harvesting start states on
-  the robot the ``*_thermal`` tasks train on); same kwargs, plus ``v_bus``."""
+  the robot the ``*_thermal`` tasks train on); same kwargs, plus ``v_bus`` and
+  ``sysid_version``."""
   cfg = g1_recover_env_cfg(play=play, **kwargs)
-  use_sysid_robot(cfg, v_bus)
+  use_sysid_robot(cfg, v_bus, sysid_version)
   return cfg
+
+
+def g1_recover_sysid_v6_env_cfg(play: bool = False, **kwargs) -> ManagerBasedRlEnvCfg:
+  """:func:`g1_recover_sysid_env_cfg` on sysID v0.6 (identified body; the
+  ``*_sysid_v6`` harvest twin of the ``*_v6`` thermal tasks)."""
+  kwargs.setdefault("sysid_version", "0.6.0")
+  return g1_recover_sysid_env_cfg(play=play, **kwargs)
 
 
 def g1_recover_thermal_env_cfg(play: bool = False, v_bus: float | None = None,
                                thermal_start_level_c=(30.0, 80.0),
                                thermal_start_floor_c: float = 30.0,
                                thermal_housing_gap_c=(0.0, 20.0),
-                               thermal_sim_heat_scale: bool = True,
+                               thermal_sim_heat_scale: bool | None = None,
                                thermal_overheat_termination: bool = True,
                                thermal_overheat_c: float | None = None,
                                thermal_barrier_c: float | None = None,
                                thermal_barrier_gamma: float | None = None,
+                               thermal_hot_groups=(),
+                               thermal_hot_extra=(),
+                               thermal_critic_structure: bool = False,
+                               sysid_version: str | None = None,
                                **kwargs) -> ManagerBasedRlEnvCfg:
   """:func:`g1_recover_noheight_env_cfg` on the lab's identified G1 with its
   motor heat model in the loop (the ``*_thermal`` tasks, ``thermal.py``):
@@ -245,7 +260,14 @@ def g1_recover_thermal_env_cfg(play: bool = False, v_bus: float | None = None,
     ``cbf_clip_frac``, ``cbf_negative_bound_frac``, ``cbf_overshoot_c``.
 
   The margin is the task registration's. The other ``thermal_*`` kwargs set
-  :class:`~robot_safety_sandbox.envs.g1_recover.thermal.ThermalCfg`."""
+  :class:`~robot_safety_sandbox.envs.g1_recover.thermal.ThermalCfg`.
+
+  ``sysid_version`` (default v0.4.0): the pinned sysID robot + heat model
+  (``envs/assets/g1_sysid.VERSIONS``); ``thermal_sim_heat_scale`` defaults to
+  that version's (on for v0.4, off -- removed upstream -- for v0.6).
+  ``thermal_critic_structure``: also the 29 STRUCTURE temperatures in the critic
+  group (the hybrid world model's analytic heat model needs all three nodes:
+  113 + 87 = 200-D)."""
   import dataclasses
 
   from mjlab.managers.metrics_manager import MetricsTermCfg
@@ -257,12 +279,19 @@ def g1_recover_thermal_env_cfg(play: bool = False, v_bus: float | None = None,
     motor_overheat, motor_winding_temp)
   if kwargs.pop("critic_pelvis_height", False):
     raise ValueError("the *_thermal tasks fix critic_pelvis_height=False")
+  from robot_safety_sandbox.envs.assets.g1_sysid import DEFAULT_VERSION, version_info
+  sv = DEFAULT_VERSION if sysid_version is None else str(sysid_version)
+  if thermal_sim_heat_scale is None:
+    thermal_sim_heat_scale = version_info(sv)["sim_heat_scale"]
   cfg = g1_recover_env_cfg(play=play, critic_pelvis_height=False, **kwargs)
-  use_sysid_robot(cfg, v_bus)
+  use_sysid_robot(cfg, v_bus, sv)
   tc = ThermalCfg(start_level_c=tuple(float(x) for x in thermal_start_level_c),
                   start_floor_c=float(thermal_start_floor_c),
                   housing_gap_c=tuple(float(x) for x in thermal_housing_gap_c),
-                  sim_heat_scale=bool(thermal_sim_heat_scale))
+                  sim_heat_scale=bool(thermal_sim_heat_scale), sysid_version=sv,
+                  hot_groups=tuple((str(g[0]), *(float(x) for x in g[1:]))
+                                   for g in thermal_hot_groups),
+                  hot_extra=tuple(float(x) for x in thermal_hot_extra))
   p = {"thermal_cfg": tc}
   cfg.observations["actor"].terms["motor_temp"] = ObservationTermCfg(
     func=motor_winding_temp, params=dict(p), noise=UniformNoiseCfg(n_min=-0.5, n_max=0.5))
@@ -270,6 +299,10 @@ def g1_recover_thermal_env_cfg(play: bool = False, v_bus: float | None = None,
     func=motor_winding_temp, params=dict(p))
   cfg.observations["critic"].terms["motor_temp_housing"] = ObservationTermCfg(
     func=motor_housing_temp, params=dict(p))
+  if thermal_critic_structure:
+    from robot_safety_sandbox.envs.g1_recover.thermal import motor_structure_temp
+    cfg.observations["critic"].terms["motor_temp_structure"] = ObservationTermCfg(
+      func=motor_structure_temp, params=dict(p))
   if thermal_overheat_termination:
     oh_c = LIMIT_C if thermal_overheat_c is None else float(thermal_overheat_c)
     cfg.terminations["motor_overheat"] = TerminationTermCfg(
@@ -291,6 +324,19 @@ def g1_recover_thermal_env_cfg(play: bool = False, v_bus: float | None = None,
                                                     reduce="max")
   elif thermal_barrier_gamma is not None:
     raise ValueError("thermal_barrier_gamma without thermal_barrier_c")
+  return cfg
+
+
+def g1_recover_noheight_v6_env_cfg(play: bool = False, v_bus: float | None = None,
+                                   **kwargs) -> ManagerBasedRlEnvCfg:
+  """The ``*_thermal70_v6`` world WITHOUT temperatures (the ``g1_recover_noheight_v6`` task;
+  the user, 2026-11-22: a lambda-Reachability fallback that sees no temperatures and guards
+  falls only): :func:`g1_recover_noheight_env_cfg` (no pelvis height in the critic group) on
+  the identified G1 of sysID v0.6 -- the same body, start bank, domain randomization, fall
+  terminations and observations as ``g1_recover_thermal70_v6`` minus the motor-temperature
+  terms (actor 98-D, critic 113-D), no heat model, no overheat termination."""
+  cfg = g1_recover_noheight_env_cfg(play=play, **kwargs)
+  use_sysid_robot(cfg, v_bus, "0.6.0")
   return cfg
 
 
@@ -327,6 +373,17 @@ def g1_recover_thermal70_env_cfg(play: bool = False, **kwargs) -> ManagerBasedRl
     raise ValueError("the *_thermal70 tasks end an episode at the limit")
   kwargs.setdefault("thermal_overheat_c", LIMIT70_C)
   return g1_recover_thermal_env_cfg(play=play, **kwargs)
+
+
+def g1_recover_thermal70_v6_env_cfg(play: bool = False, **kwargs) -> ManagerBasedRlEnvCfg:
+  """:func:`g1_recover_thermal70_env_cfg` on sysID v0.6 (the ``*_thermal70_v6``
+  tasks; the user, 2026-11-21: "use the more accurate heat model"): the
+  identified body and the heat model without ``sim_heat_scale``, and the 29
+  STRUCTURE temperatures in the critic group too (200-D), so a HYBRID world
+  model can carry all three heat-model nodes. Actor obs unchanged (127-D)."""
+  kwargs.setdefault("sysid_version", "0.6.0")
+  kwargs.setdefault("thermal_critic_structure", True)
+  return g1_recover_thermal70_env_cfg(play=play, **kwargs)
 
 
 def g1_recover_k_env_cfg(play: bool = False, **kwargs) -> ManagerBasedRlEnvCfg:

@@ -88,7 +88,7 @@ import torch
 from mjlab.envs.mdp.actions.actions import JointPositionAction, JointPositionActionCfg
 from mjlab.managers.manager_base import ManagerTermBase
 
-from robot_safety_sandbox.envs.assets.g1_sysid import linkages, motor_thermal_cls
+from robot_safety_sandbox.envs.assets.g1_sysid import linkages, motor_thermal_cls, version_info
 
 #: winding temperature limit, C: the G1 controller's damping threshold
 LIMIT_C = 85.0
@@ -113,8 +113,26 @@ class ThermalCfg:
   start_floor_c: float = 30.0
   #: winding - housing ~ U(lo, hi) per motor, C
   housing_gap_c: tuple[float, float] = (0.0, 20.0)
-  #: scale the copper heat of simulated torques to the real robot's (sysID repo)
+  #: scale the copper heat of simulated torques to the real robot's (sysID repo
+  #: v0.4 only: v0.6 removed the scale, and asking for it there is an error)
   sim_heat_scale: bool = True
+  #: the pinned sysID version (envs/assets/g1_sysid.VERSIONS) whose heat model and
+  #: linkages this world uses; it must be the robot's version too
+  sysid_version: str = "0.4.0"
+  #: HOT motor groups drawn on top of the draw above, ``((substr, tw_lo, tw_hi,
+  #: gap_lo, gap_hi), ...)``: every motor whose name contains ``substr`` gets its
+  #: own winding ~ U(tw_lo, tw_hi) C and housing = winding - U(gap_lo, gap_hi)
+  #: (not below the base draw's housing, not above the winding); its structure
+  #: keeps the base draw's (capped at the housing). Empty (default) = no extra
+  #: draw at all, so existing tasks are unchanged (the g1_cool tasks use it).
+  hot_groups: tuple = ()
+  #: RANDOM extra hot motors, ``(k_lo, k_hi, tw_lo, tw_hi, gap_lo, gap_hi)``: each
+  #: robot draws k ~ U{k_lo..k_hi} motors (uniformly, among those no hot group
+  #: names) and heats them like a hot group (winding ~ U(tw_lo, tw_hi) C, housing
+  #: = winding - U(gap_lo, gap_hi), within [base housing, winding]). Empty
+  #: (default) = none (g1_cool_thermal70_fb: any motor may start hot, so a cost on
+  #: a hot motor's heat is seen on every motor within a 20 s episode).
+  hot_extra: tuple = ()
 
 
 class MotorThermalState:
@@ -126,7 +144,11 @@ class MotorThermalState:
     self.robot = env.scene[asset_name]
     self.device = env.device
     like = torch.zeros(1, device=env.device)
-    self.th = motor_thermal_cls().from_json(like=like, sim_heat_scale=cfg.sim_heat_scale)
+    if cfg.sim_heat_scale and not version_info(cfg.sysid_version)["sim_heat_scale"]:
+      raise ValueError(f"sysID v{cfg.sysid_version} has no sim_heat_scale (removed upstream); "
+                       "build the world with sim_heat_scale=False")
+    self.th = motor_thermal_cls(cfg.sysid_version).from_json(
+      like=like, sim_heat_scale=cfg.sim_heat_scale)
     #: motor names, Unitree order (joint ``<name>_joint``)
     self.names = tuple(self.th.names)
     acts, joints = list(self.robot.actuator_names), list(self.robot.joint_names)
@@ -163,7 +185,36 @@ class MotorThermalState:
     g_lo, g_hi = c.housing_gap_c
     Th = (Tw - (g_lo + (g_hi - g_lo) * u(n, k))).clamp_min(floor)
     Th = torch.minimum(Th, Tw)
-    return Tw, Th, Th.clone()
+    Ts = Th.clone()
+    for sub, t_lo, t_hi, gp_lo, gp_hi in c.hot_groups:
+      idx = [i for i, nm in enumerate(self.names) if sub in nm]
+      if not idx:
+        raise ValueError(f"ThermalCfg.hot_groups {sub!r}: no motor name contains it")
+      kk = len(idx)
+      tw = float(t_lo) + (float(t_hi) - float(t_lo)) * u(n, kk)
+      th = tw - (float(gp_lo) + (float(gp_hi) - float(gp_lo)) * u(n, kk))
+      th = torch.minimum(torch.maximum(th, Th[:, idx]), tw)
+      Tw[:, idx] = tw
+      Th[:, idx] = th
+      Ts[:, idx] = torch.minimum(Ts[:, idx], th)
+    if c.hot_extra:
+      k_lo, k_hi, t_lo, t_hi, gp_lo, gp_hi = c.hot_extra
+      grouped = [i for i, nm in enumerate(self.names)
+                 if any(g[0] in nm for g in c.hot_groups)]
+      cand = torch.tensor([i for i in range(k) if i not in grouped], device=self.device)
+      m = int(cand.numel())
+      kk = torch.randint(int(k_lo), int(k_hi) + 1, (n, 1), device=self.device,
+                         generator=generator).clamp_(max=m)
+      rank = u(n, m).argsort(1).argsort(1)            # a random order per robot
+      pick = torch.zeros(n, k, dtype=torch.bool, device=self.device)
+      pick[:, cand] = rank < kk
+      tw = float(t_lo) + (float(t_hi) - float(t_lo)) * u(n, k)
+      th = tw - (float(gp_lo) + (float(gp_hi) - float(gp_lo)) * u(n, k))
+      th = torch.minimum(torch.maximum(th, Th), tw)
+      Tw = torch.where(pick, tw, Tw)
+      Th = torch.where(pick, th, Th)
+      Ts = torch.where(pick, torch.minimum(Ts, th), Ts)
+    return Tw, Th, Ts
 
   def reset(self, env_ids=None) -> None:
     ids = slice(None) if env_ids is None else env_ids
@@ -243,6 +294,12 @@ def motor_housing_temp(env, thermal_cfg: ThermalCfg | None = None) -> torch.Tens
   return thermal_state(env, thermal_cfg).Th.clone()
 
 
+def motor_structure_temp(env, thermal_cfg: ThermalCfg | None = None) -> torch.Tensor:
+  """Structure temperatures, C, ``(num_envs, 29)`` (an obs term; noise-free:
+  the HYBRID world model's analytic heat model needs all three nodes)."""
+  return thermal_state(env, thermal_cfg).Ts.clone()
+
+
 def motor_overheat(env, limit_c: float = LIMIT_C,
                    thermal_cfg: ThermalCfg | None = None) -> torch.Tensor:
   """Termination: some winding reached ``limit_c`` (the robot goes limp)."""
@@ -275,6 +332,16 @@ def g_fall_noheight_thermal70(env) -> torch.Tensor:
 
 g_fall_noheight_thermal70.fall_height_term = False
 g_fall_noheight_thermal70.thermal = dict(limit_c=LIMIT70_C, scale_c=SCALE_C)
+
+
+def _g_fall_noheight(env) -> torch.Tensor:
+  from robot_safety_sandbox.envs.g1_stabilize.env_cfg import g_fall_noheight
+  return g_fall_noheight(env)
+
+
+#: the margin without its thermal term: a HYBRID world model's learned head
+#: target (base._stash_head_targets), the heat model supplying the rest
+g_fall_noheight_thermal70.fall_margin = _g_fall_noheight
 
 
 # --- the temperature barrier (*_thermal_cbf tasks) ---------------------------------

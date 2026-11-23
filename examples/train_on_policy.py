@@ -115,6 +115,9 @@ _SAFETY_ONLY = (
   "privileged_critic",
   # ... and so is the recurrent (LSTM) policy
   "policy", "lstm_hidden", "lstm_layers", "lstm_net",
+  # ... and the lambda-Reachability value target (safety_sb3 feat/lambda-reach-rldh)
+  "value_estimator", "reach_lambda", "reach_delta", "reach_n_max",
+  "reach_target", "reach_tail",
 )
 
 
@@ -507,6 +510,19 @@ def main():
                       "and log_std are held -- so the value net learns V^pi on-policy. "
                       "0 (default) = off. Watch train/explained_variance: past ~0.7 the "
                       "critic is tracking returns. Warm-started runs only.")
+  # lambda-Reachability (arXiv 2606.16022): the avoid learner's value target
+  # (safety_sb3 value_estimator / reach_*; ported from the main checkout's
+  # feat/sonic-push-bench-mjlab wiring). "gae" is SafetyPPO's own estimator.
+  p.add_argument("--value-estimator", choices=("gae", "lambda_reach"), default="gae",
+                 help="avoid learners: 'gae' (SafetyPPO) or 'lambda_reach' (the closed-form "
+                      "expected lambda-Reachability target; needs safety_sb3 from "
+                      "~/safety-stable-baselines-baselines first on PYTHONPATH)")
+  p.add_argument("--reach-lambda", type=float, default=0.99)
+  p.add_argument("--reach-delta", type=float, default=None,
+                 help="lambda_reach: per-step survival probability (default: --gamma)")
+  p.add_argument("--reach-n-max", type=int, default=200)
+  p.add_argument("--reach-target", choices=("expected", "sample"), default="expected")
+  p.add_argument("--reach-tail", choices=("renormalize", "lump"), default="renormalize")
   p.add_argument("--device", default="cuda:0")
   p.add_argument("--out", default=os.path.join(_ZOO, "runs"),
                  help="output root; ALWAYS keep runs under runs/ (git-ignored) — "
@@ -607,6 +623,29 @@ def main():
                action_mag_coef=args.action_mag_coef)
     print(f"[action-penalty] rate={args.action_rate_coef} "
           f"mag={args.action_mag_coef} (on the deterministic action)")
+  # Value target. Passed only when not SafetyPPO's own GAE, so a safety_sb3
+  # that predates value_estimator still trains every GAE run.
+  _reach_defaults = {k: p.get_default(k) for k in (
+    "reach_lambda", "reach_delta", "reach_n_max", "reach_target", "reach_tail")}
+  if args.value_estimator == "lambda_reach":
+    if not algo.startswith("Safety"):
+      raise SystemExit(f"[value] lambda_reach is an AVOID backup; {algo} is not an avoid learner")
+    import importlib
+    if not hasattr(importlib.import_module("safety_sb3.backups"), "lambda_reach_return"):
+      raise SystemExit("[value] this safety_sb3 has no lambda_reach estimator; put "
+                       "~/safety-stable-baselines-baselines first on PYTHONPATH")
+    delta = args.gamma if args.reach_delta is None else args.reach_delta
+    akw.update(value_estimator="lambda_reach", reach_lambda=args.reach_lambda,
+               reach_delta=delta, reach_n_max=args.reach_n_max,
+               reach_target=args.reach_target, reach_tail=args.reach_tail)
+    print(f"[value] lambda-Reachability targets: lambda={args.reach_lambda} "
+          f"delta={delta} n_max={args.reach_n_max} (window also capped by "
+          f"n_steps={args.n_steps}) target={args.reach_target} tail={args.reach_tail}")
+  else:
+    changed = sorted(k for k, v in _reach_defaults.items() if getattr(args, k) != v)
+    if changed:
+      raise SystemExit(f"[value] {changed} only act with --value-estimator lambda_reach")
+  print(f"[safety_sb3] {os.path.dirname(_safety_sb3.__file__)}")
   if args.adversary:  # full two-player game, tensor path
     akw.update(dict(ctrl_action_dim=s.ctrl_dim,
                dstb_learning_rate=3e-4, dstb_ent_coef=2e-3,  # reference values

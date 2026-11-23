@@ -94,6 +94,11 @@ class RandomPush:
   :param max_pushes: at most this many RANDOM onsets per episode (a scripted
       push counts only when scheduled with ``count=True``); ``None`` =
       unlimited (the default, the process as it always was), ``0`` = none.
+  :param force_frac: ``(lo, hi)`` -> each RANDOM push acts at ``force_max x
+      force_scale x u``, ``u ~ U(lo, hi)`` drawn once at its onset (a spread of
+      push sizes, e.g. g1_cool's 0.2-1 m/s); ``None`` (the default) = no draw,
+      every push at ``force_max x force_scale`` exactly as before. A scripted
+      push keeps its own absolute magnitude.
 
   Per-env state a script may read (do not write it): ``t_left`` (steps the
   current push still acts after the last :meth:`forces` call), ``n_pushes``
@@ -107,7 +112,8 @@ class RandomPush:
                interval_s: Sequence[float] = (2.0, 4.0), duration_s: float = 0.2,
                first_delay_s: Sequence[float] = (0.5, 2.0), horizontal: bool = True,
                rear_frac: float = 0.0, rear_half_width_deg: float = 60.0,
-               ema: float = 0.002, max_pushes: Optional[int] = None):
+               ema: float = 0.002, max_pushes: Optional[int] = None,
+               force_frac: Optional[Sequence[float]] = None):
     self.n = int(num_envs)
     self.dt = float(dt)
     self.device = device
@@ -132,6 +138,13 @@ class RandomPush:
     if max_pushes is not None and int(max_pushes) < 0:
       raise ValueError(f"max_pushes must be None or >= 0, got {max_pushes}")
     self.max_pushes = None if max_pushes is None else int(max_pushes)
+    if force_frac is not None:
+      f_lo, f_hi = (float(x) for x in force_frac)
+      if not 0.0 <= f_lo <= f_hi:
+        raise ValueError(f"force_frac must be 0 <= lo <= hi, got {force_frac}")
+      self.force_frac = (f_lo, f_hi)
+    else:
+      self.force_frac = None
     self._interval = (self._steps(lo), self._steps(hi))
     self._first = (self._steps(flo), self._steps(fhi))
     self.duration = max(1, self._steps(duration_s))
@@ -144,6 +157,8 @@ class RandomPush:
     self.t_left = torch.zeros(self.n, **long)   # steps left in the current push
     self.age = torch.zeros(self.n, **long)      # steps since the last onset
     self.dir = torch.zeros(self.n, 3, device=device)
+    # the current random push's magnitude multiplier (force_frac; 1 without it)
+    self.frac = torch.ones(self.n, device=device)
     # heading-frame angle of the last push's force (NaN: none yet / no heading)
     self.rel = torch.full((self.n,), float("nan"), device=device)
     self._surv = torch.full((len(SIDES),), float("nan"), device=device)
@@ -258,6 +273,9 @@ class RandomPush:
     if k:
       h = heading.reshape(-1).to(self.device)[onset] if heading is not None else None
       self.dir[onset], self.rel[onset] = self._directions(k, h)
+      if self.force_frac is not None:
+        f_lo, f_hi = self.force_frac
+        self.frac[onset] = f_lo + (f_hi - f_lo) * torch.rand(k, device=self.device)
       self.t_left[onset] = self.duration
       # the next onset is measured from this one, and never inside this push
       self.t_next[onset] = self.duration + self._draw(self._interval, k)
@@ -267,6 +285,8 @@ class RandomPush:
     mag = torch.full((self.n,), float(force_max), device=self.device)
     if force_scale is not None:
       mag = mag * force_scale.reshape(-1).to(self.device)
+    if self.force_frac is not None:
+      mag = mag * self.frac
     if self._any_scripted:
       mag = torch.where(self.scripted, self._s_force, mag)
     f = self.dir * (mag * active.float()).unsqueeze(1)

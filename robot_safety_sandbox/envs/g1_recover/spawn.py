@@ -272,6 +272,10 @@ class RecoverSpawn(ManagerTermBase):
       raise ValueError(f"g1_recover uniform_mix must be in [0, 1], got "
                        f"{self.uniform_mix}")
     self.weight_column = str(p.get("weight_column") or "p_surv")
+    # False: a handover row does NOT consume the episode's random pushes (the
+    # g1_cool tasks: further minor pushes while the robot cools). Default True,
+    # the recovery tasks' "the row's push was the episode's push".
+    self.consume_handover_push = bool(p.get("consume_handover_push", True))
     self.repeats = int(p.get("sequential_repeats", 1))
     if self.repeats < 1:
       raise ValueError(f"g1_recover sequential_repeats must be >= 1, got "
@@ -477,7 +481,8 @@ class RecoverSpawn(ManagerTermBase):
                         torch.zeros_like(steps))
     pp["force_w"][ids] = f_w
     pp["steps"][ids] = steps
-    pp["consume"][ids] = has & (self.bank["kind"][r] == KIND_HANDOVER)
+    pp["consume"][ids] = (has & (self.bank["kind"][r] == KIND_HANDOVER)
+                          & self.consume_handover_push)
 
   def __call__(self, env, env_ids, **_params) -> None:
     ids = _ids(env, env_ids)

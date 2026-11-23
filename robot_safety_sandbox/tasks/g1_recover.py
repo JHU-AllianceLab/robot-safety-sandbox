@@ -148,8 +148,10 @@ LAFAN_RA_TOLS = {"g1_recover_lafan_ra": (0.25, 0.30),
 def register_all() -> None:
   from robot_safety_sandbox.envs.g1_recover.env_cfg import (
     g1_recover_env_cfg, g1_recover_k_env_cfg, g1_recover_noheight_env_cfg,
+    g1_recover_noheight_v6_env_cfg,
     g1_recover_noheight_nofoot_env_cfg, g1_recover_noheight_nofoot_nolinvel_env_cfg,
-    g1_recover_sysid_env_cfg, g1_recover_thermal70_env_cfg, g1_recover_thermal_cbf_env_cfg,
+    g1_recover_sysid_env_cfg, g1_recover_sysid_v6_env_cfg, g1_recover_thermal70_env_cfg,
+    g1_recover_thermal70_v6_env_cfg, g1_recover_thermal_cbf_env_cfg,
     g1_recover_thermal_env_cfg)
   from robot_safety_sandbox.envs.g1_recover.k_set import CLAMP as K_CLAMP, g_k
   from robot_safety_sandbox.envs.g1_recover.thermal import (
@@ -357,6 +359,36 @@ def register_all() -> None:
     kwargs=lafan_kwargs(),
     description="g1_recover_lafan on the identified G1 (dcmotor actuators, measured "
                 "ranges and collision geometry), no temperatures (avoid-only)."))
+  # sysID v0.6 (the user, 2026-11-21; envs/assets/g1_sysid.VERSIONS): the
+  # identified body (masses / COMs, joint friction, ankle corner stops, foot
+  # contact, 37.40 kg) and the heat model without sim_heat_scale. The harvest
+  # twin (no temperatures) and the thermal70 world with the structure
+  # temperatures in the critic group (200-D; the HYBRID world model's state).
+  register(TaskSpec(
+    task_id="g1_recover_lafan_sysid_v6", cfg_builder=g1_recover_sysid_v6_env_cfg,
+    margin_fn=compose(g_fall), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, dstb_dim=3, supports_adversary=False,
+    kwargs=lafan_kwargs(),
+    description="g1_recover_lafan_sysid on sysID v0.6 (identified body), no "
+                "temperatures (avoid-only)."))
+  register(TaskSpec(
+    task_id="g1_recover_noheight_v6", cfg_builder=g1_recover_noheight_v6_env_cfg,
+    margin_fn=compose(g_fall_noheight), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, kwargs=dict(G1_BRIDGE_KWARGS),
+    description="g1_recover_thermal70_v6's world without temperatures (sysID v0.6 body, "
+                "margin g_fall_noheight; the lambda-Reach fallback of the 65 C comparison)."))
+  register(TaskSpec(
+    task_id="g1_recover_thermal70_v6", cfg_builder=g1_recover_thermal70_v6_env_cfg,
+    margin_fn=compose(g_fall_noheight_thermal70), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, kwargs=dict(G1_BRIDGE_KWARGS),
+    description="g1_recover_thermal70 on sysID v0.6 (identified body, unscaled heat), "
+                "structure temperatures in the critic group (200-D; avoid-only)."))
+  register(TaskSpec(
+    task_id="g1_recover_lafan_thermal70_v6", cfg_builder=g1_recover_thermal70_v6_env_cfg,
+    margin_fn=compose(g_fall_noheight_thermal70), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, dstb_dim=3, supports_adversary=False,
+    kwargs=lafan_kwargs(),
+    description="g1_recover_lafan_thermal70 on sysID v0.6 (avoid-only, single-player)."))
   # The same task on the ViaLasso safe set K: margin g_k (already clipped and
   # anchored to K, so compose's clamp is a no-op) and the episode ends on
   # leaving K (k_set.use_k_terminations).
