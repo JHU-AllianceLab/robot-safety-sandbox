@@ -133,6 +133,10 @@ class ThermalCfg:
   #: (default) = none (g1_cool_thermal70_fb: any motor may start hot, so a cost on
   #: a hot motor's heat is seen on every motor within a 20 s episode).
   hot_extra: tuple = ()
+  #: SOAKED start (the v0.6.1 filter study, 2026-11-23): every motor's winding, housing and
+  #: structure at the robot's level T0 ~ U(start_level_c); start_floor_c, housing_gap_c and
+  #: the hot draws are then ignored
+  soaked: bool = False
 
 
 class MotorThermalState:
@@ -180,6 +184,9 @@ class MotorThermalState:
 
     lo, hi = c.start_level_c
     level = lo + (hi - lo) * u(n, 1)
+    if c.soaked:
+      Tw = level.expand(n, k).clone()
+      return Tw, Tw.clone(), Tw.clone()
     floor = float(c.start_floor_c)
     Tw = floor + (level - floor).clamp_min(0.0) * u(n, k)
     g_lo, g_hi = c.housing_gap_c

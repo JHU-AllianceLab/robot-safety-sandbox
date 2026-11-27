@@ -115,9 +115,13 @@ _SAFETY_ONLY = (
   "privileged_critic",
   # ... and so is the recurrent (LSTM) policy
   "policy", "lstm_hidden", "lstm_layers", "lstm_net",
-  # ... and the lambda-Reachability value target (safety_sb3 feat/lambda-reach-rldh)
+  # ... and the lambda-Reachability value target and the RL-DH filter (safety_sb3
+  # feat/lambda-reach-rldh)
   "value_estimator", "reach_lambda", "reach_delta", "reach_n_max",
-  "reach_target", "reach_tail",
+  "reach_target", "reach_tail", "rl_dh", "dh_reward", "dh_fail_reward",
+  "dh_bonus", "dh_explore_prob", "dh_box",
+  "dh_append_reference", "dh_critic_reference", "dh_split_ratio", "dh_b_bias_init",
+  "sonic_history",
 )
 
 
@@ -523,6 +527,48 @@ def main():
   p.add_argument("--reach-n-max", type=int, default=200)
   p.add_argument("--reach-target", choices=("expected", "sample"), default="expected")
   p.add_argument("--reach-tail", choices=("renormalize", "lump"), default="renormalize")
+  # RL-DH (arXiv 2402.05279): the action is a half-space (a, b) of controls and
+  # the env applies a reference controller's action projected onto it
+  # (safety_sb3.hyperplane; envs/g1_recover/rl_dh.py, SONIC as the reference).
+  # Ported from the main checkout's feat/sonic-push-bench-mjlab wiring.
+  p.add_argument("--rl-dh", action=argparse.BooleanOptionalAction, default=False,
+                 help="train an RL-DH half-space filter of SONIC instead of a "
+                      "fallback policy (g1_recover tasks with a harvested SONIC "
+                      "bank; SONIC on the robot's own hip pitch)")
+  p.add_argument("--dh-reward", choices=("paper", "margin"), default="paper",
+                 help="RL-DH reward: 'paper' ([DH] Eq. 7: 1 + --dh-bonus per step "
+                      "whose next state has g >= 0, --dh-fail-reward otherwise; "
+                      "CumulativePPO1P with timeout bootstrapping) or 'margin' (g "
+                      "itself with SafetyPPO1P's avoid backup; ours)")
+  p.add_argument("--dh-fail-reward", type=float, default=-1.0,
+                 help="RL-DH paper reward: c, the reward of an unsafe step (<= 0)")
+  p.add_argument("--dh-bonus", type=float, default=0.0,
+                 help="RL-DH paper reward: d_0 (with the SONIC reference it pays "
+                      "for a half-space that meets U, i.e. almost every step)")
+  p.add_argument("--dh-explore-prob", type=float, default=0.05,
+                 help="RL-DH delta: probability a step applies SONIC unfiltered")
+  p.add_argument("--dh-box", choices=("sonic", "action"), default="sonic",
+                 help="RL-DH control box U: the targets SONIC can command (default) "
+                      "or the bridge's +-action_bound box (clips SONIC)")
+  p.add_argument("--dh-append-reference", action=argparse.BooleanOptionalAction,
+                 default=True,
+                 help="RL-DH: append SONIC's action to the actor observation "
+                      "(ResSafe's actor input)")
+  p.add_argument("--dh-critic-reference", action=argparse.BooleanOptionalAction,
+                 default=True,
+                 help="RL-DH: also append SONIC's action to the privileged critic "
+                      "group, so the critic keeps seeing everything the actor sees")
+  p.add_argument("--dh-split-ratio", action=argparse.BooleanOptionalAction, default=True,
+                 help="RL-DH: the paper's split surrogate L_a + L_b (ratio_groups "
+                      "(m, 1)); --no-dh-split-ratio uses one joint ratio")
+  p.add_argument("--dh-b-bias-init", type=float, default=None,
+                 help="RL-DH: initial bias of the b output (None: the paper's init)")
+  p.add_argument("--sonic-dir", default=os.environ.get(
+                   "SONIC_DIR", os.path.expanduser("~/gear_sonic_hf")),
+                 help="RL-DH: GEAR-SONIC release directory (model_encoder/decoder.onnx)")
+  p.add_argument("--sonic-history", choices=("applied", "nominal"), default="applied",
+                 help="RL-DH: SONIC's action history holds the applied (filtered) "
+                      "action (default) or its own output")
   p.add_argument("--device", default="cuda:0")
   p.add_argument("--out", default=os.path.join(_ZOO, "runs"),
                  help="output root; ALWAYS keep runs under runs/ (git-ignored) — "
@@ -602,6 +648,53 @@ def main():
     print(f"[critic] privileged: value net reads the '{env.critic_obs_key}' group "
           f"({env.critic_observation_space.shape[0]} dims) vs the actor's "
           f"{env.observation_space.shape[0]}")
+  print(f"[safety_sb3] {os.path.dirname(_safety_sb3.__file__)}")
+  # RL-DH: the learner's env is the half-space filter around this env (which
+  # stays the env for everything that reads the mjlab managers: base_env).
+  base_env = env
+  if args.rl_dh:
+    if args.adversary or args.policy != "mlp" or args.gammas:
+      raise SystemExit("[rl-dh] single-player MLP learners only (no --adversary, "
+                       "--policy lstm or gammas)")
+    if not args.task.startswith("g1_recover"):
+      raise SystemExit(f"[rl-dh] the SONIC reference needs a g1_recover task "
+                       f"with a harvested SONIC bank, not {args.task!r}")
+    if args.action_rate_coef or args.action_mag_coef:
+      raise SystemExit("[rl-dh] action_rate_coef / action_mag_coef would act on the "
+                       "hyperplane (a, b), not on a control; set both to 0")
+    if not hasattr(_safety_sb3, "HyperplanePolicy"):
+      raise SystemExit("[rl-dh] this safety_sb3 has no RL-DH (safety_sb3.hyperplane); "
+                       "put ~/safety-stable-baselines-baselines (feat/lambda-reach-rldh) "
+                       "first on PYTHONPATH")
+    from robot_safety_sandbox.envs.g1_recover.rl_dh import make_sonic_dh_env
+    if args.dh_reward == "paper" and args.value_estimator != "gae":
+      raise SystemExit("[rl-dh] the paper reward trains a cumulative learner; "
+                       "--value-estimator lambda_reach is an avoid backup")
+    env, dh_ref = make_sonic_dh_env(
+      base_env, sonic_dir=args.sonic_dir, history=args.sonic_history,
+      box=args.dh_box, explore_prob=args.dh_explore_prob,
+      append_reference=args.dh_append_reference,
+      critic_reference=args.dh_critic_reference, reward=args.dh_reward,
+      bonus=args.dh_bonus, fail_reward=args.dh_fail_reward, seed=args.seed)
+    if args.dh_reward == "paper":
+      # [DH] Eq. 7 is an ordinary per-step reward (survival), not a margin: the
+      # cumulative learner, and an episode cut by the time limit or the rest
+      # truncation bootstraps from V instead of ending.
+      algo = "CumulativePPO1P"
+      Algo = _safety_sb3.CumulativePPO1P
+      _rw = (f"paper: {1.0 + args.dh_bonus:g} per step with g(x') >= 0, "
+             f"{args.dh_fail_reward:g} otherwise -> {algo}, timeout bootstrap")
+    else:
+      _rw = f"margin g -> {algo}"
+    print(f"[rl-dh] SONIC reference ({args.sonic_dir}, library {dh_ref.library}, "
+          f"history {args.sonic_history}, hip {dh_ref.hip}, bank harvested with hip "
+          f"{dh_ref.bank_hip}); U = {args.dh_box} box "
+          f"[{float(env.low.min()):.2f}, {float(env.high.max()):.2f}]; "
+          f"delta {args.dh_explore_prob}; action (a, b) {env.action_space.shape[0]}-D; "
+          f"actor obs {env.observation_space.shape[0]}-D"
+          f"{' (+ u_ref)' if args.dh_append_reference else ''}; critic obs "
+          f"{env.critic_observation_space.shape[0] if env.critic_observation_space is not None else '-'}-D"
+          f"{' (+ u_ref)' if getattr(env, 'critic_reference', False) else ''}; reward {_rw}")
   eff_ec = args.end_criterion if args.end_criterion is not None else s.end_criterion
   print(f"[end-criterion] {args.task} -> {eff_ec}"
         f"{' (override)' if args.end_criterion is not None else ' (task default)'}")
@@ -645,7 +738,17 @@ def main():
     changed = sorted(k for k, v in _reach_defaults.items() if getattr(args, k) != v)
     if changed:
       raise SystemExit(f"[value] {changed} only act with --value-estimator lambda_reach")
-  print(f"[safety_sb3] {os.path.dirname(_safety_sb3.__file__)}")
+  if args.rl_dh and args.dh_split_ratio:
+    akw["ratio_groups"] = (int(env.m), 1)
+    print(f"[rl-dh] split surrogate L_a + L_b: ratio_groups=({env.m}, 1)")
+  _dh_rw_changed = sorted(k for k in ("dh_reward", "dh_fail_reward", "dh_bonus")
+                          if getattr(args, k) != p.get_default(k))
+  if args.rl_dh and args.dh_reward == "paper":
+    akw["bootstrap_on_timeout"] = True
+  elif not args.rl_dh and _dh_rw_changed:
+    raise SystemExit(f"[rl-dh] {_dh_rw_changed} need --rl-dh")
+  elif args.rl_dh and set(_dh_rw_changed) & {"dh_fail_reward", "dh_bonus"}:
+    raise SystemExit("[rl-dh] --dh-fail-reward / --dh-bonus only act with --dh-reward paper")
   if args.adversary:  # full two-player game, tensor path
     akw.update(dict(ctrl_action_dim=s.ctrl_dim,
                dstb_learning_rate=3e-4, dstb_ent_coef=2e-3,  # reference values
@@ -688,6 +791,14 @@ def main():
                lstm_layers=args.lstm_layers)
     print(f"[policy] LSTM actor-critic: obs -> LSTM({args.lstm_hidden} x "
           f"{args.lstm_layers}) -> ELU MLP {net} (actor and critic each)")
+  if args.rl_dh:
+    # The hyperplane head: m + 1 Gaussian outputs (a, b); the net and the
+    # initial std are this recipe's, the rest the paper's (Tanh, default init).
+    policy_name = _safety_sb3.HyperplanePolicy
+    if args.dh_b_bias_init is not None:
+      pkw["b_bias_init"] = args.dh_b_bias_init
+    print(f"[rl-dh] HyperplanePolicy net={net} log_std_init={pkw['log_std_init']:.3f}"
+          f" b_bias_init={args.dh_b_bias_init}")
   model = Algo(
     policy_name, env, **akw, **gamma_kw,
     n_steps=args.n_steps, batch_size=args.num_envs * args.n_steps // 4, n_epochs=5,
@@ -963,8 +1074,8 @@ def main():
     # top (g1_recover_arm_random_wrench), and then both curricula run -- the
     # force on force_max/force_scale, the arms on dstb_gain/dstb_scale.
     _joint_authority_curriculum("random-joints")
-  for _name in env.mj.command_manager.active_terms:
-    if getattr(env.mj.command_manager.get_term(_name), "ramped", False):
+  for _name in base_env.mj.command_manager.active_terms:
+    if getattr(base_env.mj.command_manager.get_term(_name), "ramped", False):
       cbs.append(TargetScaleRampCallback(
         _name, int(args.target_ramp_frac * args.steps),
         scale_start=args.target_scale_init))
@@ -989,14 +1100,18 @@ def main():
   # force_max / force_scale onto it); push overrides only exist for args.task.
   _vkw = ({"random_push": push_kw}
           if push_kw is not None and _vtask == args.task else {})
-  cbs.append(VideoWandbCallback(
-    lambda: make_tensor(_vtask, 8, args.device, adversary=False,
-                        render_mode="rgb_array",  # native herd, one scene
-                        end_criterion=args.end_criterion, **_vkw),
-    interval=args.video_interval, video_seconds=args.video_seconds,
-    fps=args.video_fps, outdir=outdir,
-    to_wandb=args.video_wandb and not args.no_wandb,
-    herd=None if args.video_herd < 0 else args.video_herd))
+  if args.rl_dh:
+    # The clip env would need the SONIC reference and the projection too.
+    print("[rl-dh] training videos off (the clip env has no SONIC reference)")
+  else:
+    cbs.append(VideoWandbCallback(
+      lambda: make_tensor(_vtask, 8, args.device, adversary=False,
+                          render_mode="rgb_array",  # native herd, one scene
+                          end_criterion=args.end_criterion, **_vkw),
+      interval=args.video_interval, video_seconds=args.video_seconds,
+      fps=args.video_fps, outdir=outdir,
+      to_wandb=args.video_wandb and not args.no_wandb,
+      herd=None if args.video_herd < 0 else args.video_herd))
 
   model.learn(total_timesteps=args.steps, callback=CallbackList(cbs))
   model.save(os.path.join(outdir, "final_model.zip"))

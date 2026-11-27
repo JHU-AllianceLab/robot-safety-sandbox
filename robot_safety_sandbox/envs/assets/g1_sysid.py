@@ -91,6 +91,27 @@ VERSIONS = {
       "g1_sysid/__init__.py":
         "5f24fa30bef5d04f3c8c6aa644c3ccf519fdb6bf6c24dea83728d4b8d5aaf741",
     }),
+  # v0.6.1 (2026-11-22): only the heat model's waist linkage sign changed (-1 -> +1: which waist
+  # motor carries (pitch + roll) / 2); the body files hash as in v0.6.0. Same pins as CoolMimic's
+  # coolmimic/sailr/sysid.py, which defers to this entry once it exists.
+  "0.6.1": dict(
+    commit="8758984", dir_env="G1_SYSID_V061_DIR",
+    default_dir="~/G1-robot-model-with-SysID-v0.6.1",
+    identified_body=True, sim_heat_scale=False,
+    pins={
+      "models/thermal_params.json":
+        "bf2dfdccf1958d111e2cbfe477f1b19dda50b7fe22eca3cabaa43b398f8151b1",
+      "integrations/mjlab/g1_sysid_params.py":
+        "dd9f1ed3b3576cfeb52a975f795168ce2e9f588d9da7d71d1bc666f2b5dc2b1e",
+      "g1_sysid/thermal.py":
+        "3cf8b7de6d3634f64fa7231aa857d250020ced02fb6aa0b18f0f94b4db8ddf77",
+      "g1_sysid/body.py":
+        "fedce3ce6ea465670beee6012e4b379b523650422455cb1cc6962fae862586f6",
+      "models/body_params.json":
+        "287011c5d60c99d0f464563225bc17a4a920986f2da1ea05927ab55ef2c703a7",
+      "g1_sysid/__init__.py":
+        "8de437b8ced317014db3db703cfad98f224093dc488f6850cdef26c72c0299a5",
+    }),
 }
 #: the version a builder uses when none is named (every pre-v6 task)
 DEFAULT_VERSION = "0.4.0"

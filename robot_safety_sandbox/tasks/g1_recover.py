@@ -152,7 +152,8 @@ def register_all() -> None:
     g1_recover_noheight_nofoot_env_cfg, g1_recover_noheight_nofoot_nolinvel_env_cfg,
     g1_recover_sysid_env_cfg, g1_recover_sysid_v6_env_cfg, g1_recover_thermal70_env_cfg,
     g1_recover_thermal70_v6_env_cfg, g1_recover_thermal_cbf_env_cfg,
-    g1_recover_thermal_env_cfg)
+    g1_recover_thermal_env_cfg, g1_recover_thermal70_v61_env_cfg,
+    g1_recover_noheight_v61_heat_env_cfg)
   from robot_safety_sandbox.envs.g1_recover.k_set import CLAMP as K_CLAMP, g_k
   from robot_safety_sandbox.envs.g1_recover.thermal import (
     g_fall_noheight_thermal, g_fall_noheight_thermal70)
@@ -389,6 +390,35 @@ def register_all() -> None:
     ctrl_dim=G1_CTRL_DIM, dstb_dim=3, supports_adversary=False,
     kwargs=lafan_kwargs(),
     description="g1_recover_lafan_thermal70 on sysID v0.6 (avoid-only, single-player)."))
+  # sysID v0.6.1 (the v0.6.1 filter study, 2026-11-23): the thermal70 world with the waist
+  # linkage sign fix, and the EVALUATION world of the heat-blind filters (no temperature in
+  # any observation; the heat model and the 70 C failure in the loop).
+  register(TaskSpec(
+    task_id="g1_recover_thermal70_v61", cfg_builder=g1_recover_thermal70_v61_env_cfg,
+    margin_fn=compose(g_fall_noheight_thermal70), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, kwargs=dict(G1_BRIDGE_KWARGS),
+    description="g1_recover_thermal70_v6 on sysID v0.6.1 (waist linkage sign fix; avoid-only)."))
+  register(TaskSpec(
+    task_id="g1_recover_noheight_v61_heat", cfg_builder=g1_recover_noheight_v61_heat_env_cfg,
+    margin_fn=compose(g_fall_noheight), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, kwargs=dict(G1_BRIDGE_KWARGS),
+    description="EVALUATION: g1_recover_noheight_v6's observations (no temperatures) in the "
+                "v0.6.1 heat world; a winding at 70 C ends the episode as a failure."))
+  # their SONIC-driven twins, for the Beat-Its' world-model tube calibration rollouts
+  # (eval_sonic_qcbf.py wmcalib:clean)
+  register(TaskSpec(
+    task_id="g1_recover_lafan_thermal70_v61", cfg_builder=g1_recover_thermal70_v61_env_cfg,
+    margin_fn=compose(g_fall_noheight_thermal70), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, dstb_dim=3, supports_adversary=False,
+    kwargs=lafan_kwargs(),
+    description="g1_recover_lafan_thermal70 on sysID v0.6.1 (avoid-only, single-player)."))
+  register(TaskSpec(
+    task_id="g1_recover_lafan_noheight_v6", cfg_builder=g1_recover_noheight_v6_env_cfg,
+    margin_fn=compose(g_fall_noheight), mode=AVOID,
+    ctrl_dim=G1_CTRL_DIM, dstb_dim=3, supports_adversary=False,
+    kwargs=lafan_kwargs(),
+    description="g1_recover_noheight_v6 driven by SONIC on LAFAN clips (no temperatures; "
+                "avoid-only, single-player)."))
   # The same task on the ViaLasso safe set K: margin g_k (already clipped and
   # anchored to K, so compose's clamp is a no-op) and the episode ends on
   # leaving K (k_set.use_k_terminations).

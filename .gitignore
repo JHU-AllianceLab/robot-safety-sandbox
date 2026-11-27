@@ -15,6 +15,7 @@ runs_dense*/
 runs_*/          # belt: any accidental runs_<suffix> sibling stays untracked
 wandb/
 logs/
+/logs
 *.egg-info/
 .venv/
 

@@ -240,6 +240,8 @@ def g1_recover_thermal_env_cfg(play: bool = False, v_bus: float | None = None,
                                thermal_hot_groups=(),
                                thermal_hot_extra=(),
                                thermal_critic_structure: bool = False,
+                               thermal_start_soaked: bool = False,
+                               thermal_obs: bool = True,
                                sysid_version: str | None = None,
                                **kwargs) -> ManagerBasedRlEnvCfg:
   """:func:`g1_recover_noheight_env_cfg` on the lab's identified G1 with its
@@ -267,7 +269,12 @@ def g1_recover_thermal_env_cfg(play: bool = False, v_bus: float | None = None,
   that version's (on for v0.4, off -- removed upstream -- for v0.6).
   ``thermal_critic_structure``: also the 29 STRUCTURE temperatures in the critic
   group (the hybrid world model's analytic heat model needs all three nodes:
-  113 + 87 = 200-D)."""
+  113 + 87 = 200-D).
+  ``thermal_start_soaked``: every motor's three nodes start at the robot's level
+  (``ThermalCfg.soaked``). ``thermal_obs=False``: the heat model runs, ends episodes
+  and logs, but NO temperature reaches an observation group (actor 98-D, critic
+  113-D): a temperature-agnostic policy scored in a hot world (the v0.6.1 filter
+  study's evaluation of the heat-blind filters)."""
   import dataclasses
 
   from mjlab.managers.metrics_manager import MetricsTermCfg
@@ -291,14 +298,18 @@ def g1_recover_thermal_env_cfg(play: bool = False, v_bus: float | None = None,
                   sim_heat_scale=bool(thermal_sim_heat_scale), sysid_version=sv,
                   hot_groups=tuple((str(g[0]), *(float(x) for x in g[1:]))
                                    for g in thermal_hot_groups),
-                  hot_extra=tuple(float(x) for x in thermal_hot_extra))
+                  hot_extra=tuple(float(x) for x in thermal_hot_extra),
+                  soaked=bool(thermal_start_soaked))
   p = {"thermal_cfg": tc}
-  cfg.observations["actor"].terms["motor_temp"] = ObservationTermCfg(
-    func=motor_winding_temp, params=dict(p), noise=UniformNoiseCfg(n_min=-0.5, n_max=0.5))
-  cfg.observations["critic"].terms["motor_temp"] = ObservationTermCfg(
-    func=motor_winding_temp, params=dict(p))
-  cfg.observations["critic"].terms["motor_temp_housing"] = ObservationTermCfg(
-    func=motor_housing_temp, params=dict(p))
+  if thermal_obs:
+    cfg.observations["actor"].terms["motor_temp"] = ObservationTermCfg(
+      func=motor_winding_temp, params=dict(p), noise=UniformNoiseCfg(n_min=-0.5, n_max=0.5))
+    cfg.observations["critic"].terms["motor_temp"] = ObservationTermCfg(
+      func=motor_winding_temp, params=dict(p))
+    cfg.observations["critic"].terms["motor_temp_housing"] = ObservationTermCfg(
+      func=motor_housing_temp, params=dict(p))
+  elif thermal_critic_structure:
+    raise ValueError("thermal_critic_structure needs thermal_obs")
   if thermal_critic_structure:
     from robot_safety_sandbox.envs.g1_recover.thermal import motor_structure_temp
     cfg.observations["critic"].terms["motor_temp_structure"] = ObservationTermCfg(
@@ -384,6 +395,27 @@ def g1_recover_thermal70_v6_env_cfg(play: bool = False, **kwargs) -> ManagerBase
   kwargs.setdefault("sysid_version", "0.6.0")
   kwargs.setdefault("thermal_critic_structure", True)
   return g1_recover_thermal70_env_cfg(play=play, **kwargs)
+
+
+def g1_recover_thermal70_v61_env_cfg(play: bool = False, **kwargs) -> ManagerBasedRlEnvCfg:
+  """:func:`g1_recover_thermal70_v6_env_cfg` on sysID v0.6.1 (the ``*_thermal70_v61`` tasks;
+  the user, 2026-11-23: the v0.6.1 filter study). v0.6.1 changes only the heat model's waist
+  linkage sign; the body is v0.6.0's."""
+  kwargs.setdefault("sysid_version", "0.6.1")
+  return g1_recover_thermal70_v6_env_cfg(play=play, **kwargs)
+
+
+def g1_recover_noheight_v61_heat_env_cfg(play: bool = False, **kwargs) -> ManagerBasedRlEnvCfg:
+  """EVALUATION world of the heat-blind filters (the ``g1_recover_noheight_v61_heat`` task; the
+  user, 2026-11-23): the observations of ``g1_recover_noheight_v6`` (actor 98-D, critic 113-D,
+  no temperatures) in the v0.6.1 thermal70 world. The heat model integrates, a winding at 70 C
+  ends the episode as a failure, start temperatures as asked (``thermal_start_*``). The margin
+  is the registration's (falls only); the terminations score the outcome."""
+  from robot_safety_sandbox.envs.g1_recover.thermal import LIMIT70_C
+  kwargs.setdefault("sysid_version", "0.6.1")
+  kwargs.setdefault("thermal_start_level_c", (30.0, LIMIT70_C))
+  kwargs.setdefault("thermal_overheat_c", LIMIT70_C)
+  return g1_recover_thermal_env_cfg(play=play, thermal_obs=False, **kwargs)
 
 
 def g1_recover_k_env_cfg(play: bool = False, **kwargs) -> ManagerBasedRlEnvCfg:

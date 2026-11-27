@@ -1,0 +1,67 @@
+# RL-DH (Lavanakul et al., arXiv 2402.05279; the safety-filter baseline of ResSafe, arXiv
+# 2609.15988) on the identified G1 WITHOUT temperatures: the world of the lambda-Reach v6
+# fallback (configs/g1_recover_noheight_v6_lambdareach1p.yaml: task g1_recover_noheight_v6 =
+# sysID v0.6 body, the v6 SONIC handover bank, DR, fall terminations, 3 s episodes, rest
+# truncation; actor 98-D, critic 113-D, margin g_fall_noheight, no heat model). Recipe = the
+# main checkout's RL-DH runs (configs/g1_recover_sonic_rldh1p.yaml, runs/sonic_baselines/
+# rldh_s*), verbatim but for the task and bank.
+#
+# The PPO action is a half-space (a, b) of controls (29 + 1 numbers); the env applies SONIC's
+# action projected onto it (exact min-norm projection inside U = the targets SONIC can
+# command). SONIC resumes the spawn row's LAFAN clip at its frame each episode, on the robot's
+# own hip pitch, as the v6 bank was harvested (--hip mjlab; envs/g1_recover/rl_dh.py refuses a
+# bank harvested on another hip). Reward = the paper's ([DH] Eq. 7): +1 per step whose next
+# state has g_fall_noheight >= 0, -1 otherwise, bonus 0 -> CumulativePPO1P, and an episode cut
+# by the 3 s limit or the rest truncation bootstraps from V (a fall ends it). Ours, not the
+# paper's: delta = 0.05 (SONIC unfiltered); SONIC's action appended to the actor obs (127-D)
+# and the privileged critic group (142-D); the split surrogate L_a + L_b; no action
+# penalties; no training videos.
+#
+#   PYTHONPATH=$HOME/safety-stable-baselines-baselines python examples/train.py \
+#       --config configs/g1_recover_noheight_v6_rldh1p.yaml --seed 0 \
+#       --out runs/v061_study/rldh_noheight_s0
+#   (sbatch configs/sweeps/v061_study/rldh_train.sh   [SEED=0 SMOKE=1])
+#
+family: on_policy
+task: g1_recover_noheight_v6
+num_envs: 4096
+steps: 1500000000
+seed: 0
+
+env_overrides:
+  dataset: data/g1_sonic_push_gfall_sysid316v6_train_bank_net.pt
+  weights: {handover: 1.0, nominal: 0.0, clean: 0.0, pushed: 0.0, fell: 0.0,
+            synthetic: 0.0, mocap: 0.0}
+  sampler: uniform
+  episode_length_s: 3.0
+  rest_terminate: true
+  rest_dwell_s: 0.4
+  rest_arm_s: 0.8
+
+privileged_critic: true
+gamma: 0.99
+gamma_anneal: false
+net: "512,256,128"
+action_rate_coef: 0.0
+action_mag_coef: 0.0
+
+rl_dh: true
+dh_reward: paper
+dh_fail_reward: -1.0
+dh_bonus: 0.0
+dh_explore_prob: 0.05
+dh_box: sonic
+dh_append_reference: true
+dh_critic_reference: true
+dh_split_ratio: true
+sonic_history: applied
+# sonic_dir: $SONIC_DIR, else ~/gear_sonic_hf (train_on_policy.py --sonic-dir)
+
+lr: 1.0e-4
+adaptive_lr: false
+target_kl: 0.01
+ent_coef: 1.0e-3
+max_std: 0.4
+critic_warmup_steps: 0
+
+checkpoint_every: 50000000
