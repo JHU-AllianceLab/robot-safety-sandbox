@@ -261,6 +261,9 @@ def _parse(argv=None):
                       "predicted g, minus min_eps[c][H] of --tube-calib; needs --no-push")
   p.add_argument("--tube-calib", default=None,
                  help="--wm-tube: the min_tube.json of calibrate_wm_min_tube.py")
+  p.add_argument("--no-critic-foot", action="store_true",
+                 help="the world without the critic foot terms (critic_foot_terms=False; 188-D state): label with "
+                      "the no-foot STUDENT world model (runs/beatit_student_v061/nofoot_s0) as --wm-tube scorer")
   p.add_argument("--dump-wm", action="store_true",
                  help="--wm-tube: also record each episode's world-model inputs at its start "
                       "(wm_S the true critic state, wm_C the sim context, wm_a pi's first action) "
@@ -1318,6 +1321,8 @@ def main(argv=None):
     if len(tc) not in (1, 2) or tc[0] > tc[-1]:
       raise SystemExit("--thermal-start-c takes T0 or LO HI (LO <= HI)")
     overrides.update(thermal_start_level_c=(tc[0], tc[-1]), thermal_start_soaked=True)
+  if getattr(args, "no_critic_foot", False):
+    overrides["critic_foot_terms"] = False
   env = make_env(args, overrides, push_kw, value.critic_obs_key)
   seq_len = getattr(env.mj, "_zoo_spawn_seq_len", None)
   print(f"[label] {args.policy} ({'asymmetric' if value.asymmetric else 'symmetric'} "
